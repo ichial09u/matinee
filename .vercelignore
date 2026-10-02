@@ -1,0 +1,22 @@
+# Sandbox tooling — not part of the deployed site
+examples
+mini-services
+tests
+db
+upload
+download
+scripts
+skills
+prisma/migrations
+.claude
+.z-ai-config
+Caddyfile
+README.md
+*.log
+*.tsbuildinfo
+
+# Build artifacts & deps (redundant with .gitignore, kept for safety)
+node_modules
+.next
+out
+build
