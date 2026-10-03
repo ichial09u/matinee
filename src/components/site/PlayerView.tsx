@@ -17,11 +17,19 @@ import {
   ListVideo,
   SkipForward,
   Loader2,
+  Captions,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchDetails, fetchSeason, stillUrl } from "@/lib/api";
 import { getProgress, progressKey, removeProgress, saveProgress } from "@/lib/progress";
 import { enterImmersive, isPortrait, isTouchDevice } from "@/lib/immersive";
+import {
+  cueAt,
+  fetchSubtitleCues,
+  fetchSubtitleLanguages,
+  type Cue,
+  type SubtitleLang,
+} from "@/lib/subtitles";
 import type { MediaItem, Episode } from "@/lib/types";
 
 // ============================================================
@@ -136,6 +144,18 @@ export function PlayerView({
     ratio: 0,
   });
 
+  // Speed / captions popups (tabs instead of cycling)
+  const [rateMenu, setRateMenu] = useState(false);
+  const [ccMenu, setCcMenu] = useState(false);
+  const [ccLang, setCcLang] = useState<string | null>(null);
+  const [ccCues, setCcCues] = useState<Cue[]>([]);
+  const [ccOptions, setCcOptions] = useState<{
+    key: string;
+    langs: SubtitleLang[];
+  } | null>(null);
+  const [ccBusy, setCcBusy] = useState(false);
+  const [ccError, setCcError] = useState<string | null>(null);
+
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -148,6 +168,11 @@ export function PlayerView({
   const episodesOpenRef = useRef(false);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoImmersiveRef = useRef({ done: false, pending: false });
+  const rateMenuRef = useRef(false);
+  const ccMenuRef = useRef(false);
+  const lastCcLangRef = useRef<string | null>(null);
+  const ccAbortRef = useRef<AbortController | null>(null);
+  const ccOptionsRef = useRef(ccOptions);
 
   // Mirrors of state for use inside timers / native callbacks.
   // (Updated in effects — never during render.)
@@ -157,6 +182,18 @@ export function PlayerView({
   useEffect(() => {
     episodesOpenRef.current = episodesOpen;
   }, [episodesOpen]);
+  useEffect(() => {
+    rateMenuRef.current = rateMenu;
+  }, [rateMenu]);
+  useEffect(() => {
+    ccMenuRef.current = ccMenu;
+  }, [ccMenu]);
+  useEffect(() => {
+    ccOptionsRef.current = ccOptions;
+  }, [ccOptions]);
+  useEffect(() => {
+    if (ccLang) lastCcLangRef.current = ccLang;
+  }, [ccLang]);
 
   // Kill a pending single-tap when the surface unmounts
   useEffect(() => {
@@ -269,7 +306,12 @@ export function PlayerView({
     setControlsVisible(true);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     hideTimerRef.current = setTimeout(() => {
-      if (playingRef.current && !episodesOpenRef.current) {
+      if (
+        playingRef.current &&
+        !episodesOpenRef.current &&
+        !rateMenuRef.current &&
+        !ccMenuRef.current
+      ) {
         setControlsVisible(false);
       }
     }, 3000);
@@ -359,12 +401,94 @@ export function PlayerView({
     [poke, send]
   );
 
-  const cycleRate = useCallback(() => {
-    const next = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
-    setRate(next);
-    send("setPlaybackRate", [next]);
-    poke();
-  }, [poke, rate, send]);
+  // Speed — picked from a popup of option tabs (no more cycling)
+  const setRateTo = useCallback(
+    (r: number) => {
+      setRate(r);
+      send("setPlaybackRate", [r]);
+      setRateMenu(false);
+      poke();
+    },
+    [poke, send]
+  );
+
+  // ---------- closed captions (in-house caption layer) ----------
+  const ccKey = `${item.id}:${isTv ? `${display.season}-${display.episode}` : "m"}`;
+
+  const openCcMenu = useCallback(() => {
+    setCcMenu(true);
+    setRateMenu(false);
+    setCcError(null);
+    if (ccOptionsRef.current?.key === ccKey) return;
+    ccAbortRef.current?.abort();
+    const controller = new AbortController();
+    ccAbortRef.current = controller;
+    setCcBusy(true);
+    fetchSubtitleLanguages(
+      item.id,
+      isTv ? display.season : undefined,
+      isTv ? display.episode : undefined,
+      controller.signal
+    )
+      .then((langs) => {
+        if (controller.signal.aborted) return;
+        setCcOptions({ key: ccKey, langs });
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setCcError("Couldn't reach the subtitle service. Try again.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCcBusy(false);
+      });
+  }, [ccKey, display.episode, display.season, isTv, item.id]);
+
+  const chooseCc = useCallback((lang: string | null) => {
+    setCcMenu(false);
+    setCcLang((prev) => (prev === lang ? prev : lang));
+  }, []);
+
+  // Fetch cues for the selected language; re-runs when the episode
+  // changes so captions follow along.
+  useEffect(() => {
+    if (!ccLang) {
+      setCcCues([]);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setCcCues([]); // nothing stale while the new file loads
+    (async () => {
+      try {
+        const cached = ccOptionsRef.current;
+        const opts =
+          cached?.key === ccKey
+            ? cached.langs
+            : await fetchSubtitleLanguages(
+                item.id,
+                isTv ? display.season : undefined,
+                isTv ? display.episode : undefined,
+                controller.signal
+              );
+        if (cancelled) return;
+        if (cached?.key !== ccKey) setCcOptions({ key: ccKey, langs: opts });
+        const group = opts.find((l) => l.language === ccLang);
+        if (!group) {
+          // this episode has no captions in that language
+          setCcLang(null);
+          return;
+        }
+        const cues = await fetchSubtitleCues(group.best.url, controller.signal);
+        if (!cancelled) setCcCues(cues);
+      } catch {
+        if (!cancelled) setCcLang(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [ccLang, ccKey, display.episode, display.season, isTv, item.id]);
 
   const toggleFullscreen = useCallback(() => {
     const el = wrapRef.current as (HTMLDivElement & {
@@ -602,8 +726,16 @@ export function PlayerView({
             goNext();
           }
           break;
+        case "c":
+        case "C":
+          e.preventDefault();
+          chooseCc(ccLang ? null : (lastCcLangRef.current ?? "English"));
+          break;
         case "Escape":
-          if (episodesOpenRef.current) {
+          if (rateMenuRef.current || ccMenuRef.current) {
+            setRateMenu(false);
+            setCcMenu(false);
+          } else if (episodesOpenRef.current) {
             setEpisodesOpen(false);
           } else if (!document.fullscreenElement) {
             onBack();
@@ -614,6 +746,8 @@ export function PlayerView({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
+    ccLang,
+    chooseCc,
     goNext,
     hasNextEpisode,
     onBack,
@@ -689,22 +823,23 @@ export function PlayerView({
   const shownRatio =
     duration > 0 ? (drag.active ? drag.ratio : time / duration) : 0;
 
-  // ---------- surface taps: single = play/pause, double = fullscreen ----------
+  // ---------- surface taps: single = wake controls, double = fullscreen ----------
+  // A single tap NEVER pauses — pausing only happens on the center
+  // or bottom play/pause buttons (as requested).
   const onSurfaceClick = useCallback(() => {
     tryAutoImmersive(); // fresh user gesture — a good moment to retry
     poke();
     if (tapTimerRef.current) {
-      // second tap within the window → double tap
+      // second tap within the window → double tap = fullscreen
       clearTimeout(tapTimerRef.current);
       tapTimerRef.current = null;
       toggleFullscreen();
     } else {
       tapTimerRef.current = setTimeout(() => {
-        tapTimerRef.current = null;
-        togglePlay();
-      }, 220);
+        tapTimerRef.current = null; // single tap: controls only
+      }, 250);
     }
-  }, [poke, tryAutoImmersive, toggleFullscreen, togglePlay]);
+  }, [poke, tryAutoImmersive, toggleFullscreen]);
 
   // ---------- render ----------
   return (
@@ -743,12 +878,90 @@ export function PlayerView({
       {/* Click shield — every pointer event on the video surface belongs to
           the Matinee player. The embed (and any fake "Play" overlays inside
           it) never receives a click, so click-bait ads have nothing to
-          intercept. Single tap toggles play, double tap goes fullscreen. */}
+          intercept. A single tap only wakes the controls — it never pauses.
+          Double tap goes fullscreen. */}
       <div
         aria-hidden
         className="absolute inset-0 z-[5]"
         onClick={onSurfaceClick}
       />
+
+      {/* ---------- Center controls: [-10s] [Play/Pause] [+10s] ---------- */}
+      {ready && !error && (
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-0 z-[8] flex items-center justify-center transition-opacity duration-300",
+            controlsVisible ? "opacity-100" : "opacity-0"
+          )}
+        >
+          <div
+            className={cn(
+              "flex items-center gap-8 sm:gap-12",
+              controlsVisible ? "pointer-events-auto" : "pointer-events-none"
+            )}
+          >
+            {/* Back 10s — left of the center play/pause */}
+            <button
+              type="button"
+              aria-label="Back 10 seconds"
+              title="Back 10s (←)"
+              onClick={() => seekBy(-10)}
+              className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+            >
+              <span className="relative flex h-14 w-14 items-center justify-center sm:h-16 sm:w-16">
+                <RotateCcw className="h-12 w-12 sm:h-14 sm:w-14" aria-hidden />
+                <span className="absolute text-[11px] font-black">10</span>
+              </span>
+            </button>
+
+            {/* Play / Pause — the big center button */}
+            <button
+              type="button"
+              aria-label={playing ? "Pause" : "Play"}
+              title={playing ? "Pause (Space)" : "Play (Space)"}
+              onClick={togglePlay}
+              className="flex h-[76px] w-[76px] items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm transition-all hover:scale-105 hover:bg-black/65 active:scale-95 sm:h-20 sm:w-20"
+            >
+              {playing ? (
+                <Pause className="h-11 w-11 fill-current" aria-hidden />
+              ) : (
+                <Play className="h-11 w-11 translate-x-0.5 fill-current" aria-hidden />
+              )}
+            </button>
+
+            {/* Forward 10s — right of the center play/pause */}
+            <button
+              type="button"
+              aria-label="Forward 10 seconds"
+              title="Forward 10s (→)"
+              onClick={() => seekBy(10)}
+              className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+            >
+              <span className="relative flex h-14 w-14 items-center justify-center sm:h-16 sm:w-16">
+                <RotateCw className="h-12 w-12 sm:h-14 sm:w-14" aria-hidden />
+                <span className="absolute text-[11px] font-black">10</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Closed captions overlay ---------- */}
+      {(() => {
+        const cue = ccCues.length > 0 ? cueAt(ccCues, time) : null;
+        return cue ? (
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 z-[9] flex justify-center px-6 transition-[bottom] duration-300",
+              controlsVisible ? "bottom-32 sm:bottom-28" : "bottom-8"
+            )}
+          >
+            <p className="max-w-[80%] whitespace-pre-line rounded-[6px] bg-black/55 px-3 py-1 text-center text-[17px] font-medium leading-snug text-white [text-shadow:0_1px_4px_rgba(0,0,0,1)] sm:text-[20px] md:text-[24px]">
+              {cue.text}
+            </p>
+          </div>
+        ) : null;
+      })()}
 
       {/* Loading veil */}
       {!ready && !error && (
@@ -1019,10 +1232,30 @@ export function PlayerView({
               </button>
             )}
 
+            {/* Closed captions */}
             <button
               type="button"
-              onClick={cycleRate}
+              onClick={() => (ccMenu ? setCcMenu(false) : openCcMenu())}
+              aria-label="Subtitles"
+              aria-pressed={Boolean(ccLang)}
+              title="Subtitles (C)"
+              className={cn(
+                "transition-transform hover:scale-110",
+                ccLang ? "text-[#e50914]" : "text-white"
+              )}
+            >
+              <Captions className="h-7 w-7" aria-hidden />
+            </button>
+
+            {/* Speed — opens option tabs */}
+            <button
+              type="button"
+              onClick={() => {
+                setRateMenu((o) => !o);
+                setCcMenu(false);
+              }}
               aria-label={`Playback speed ${rate}x`}
+              aria-expanded={rateMenu}
               className="min-w-[36px] text-[13px] font-bold tabular-nums transition-transform hover:scale-110"
             >
               {rate}x
@@ -1043,6 +1276,128 @@ export function PlayerView({
           </div>
         </div>
       </div>
+
+      {/* ---------- Popups: outside-click shield ---------- */}
+      {(rateMenu || ccMenu) && (
+        <div
+          aria-hidden
+          className="absolute inset-0 z-20"
+          onClick={() => {
+            setRateMenu(false);
+            setCcMenu(false);
+          }}
+        />
+      )}
+
+      {/* ---------- Speed option tabs ---------- */}
+      {rateMenu && (
+        <div
+          role="menu"
+          aria-label="Playback speed"
+          className="absolute bottom-24 right-3 z-30 rounded-[8px] bg-[#181818]/97 p-3 ring-1 ring-white/15 backdrop-blur md:right-8"
+        >
+          <p className="px-1 pb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+            Speed
+          </p>
+          <div className="flex max-w-[70vw] flex-wrap items-center gap-1">
+            {RATES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                role="menuitemradio"
+                aria-checked={rate === r}
+                onClick={() => setRateTo(r)}
+                className={cn(
+                  "rounded-[6px] px-3 py-1.5 text-[13px] font-bold tabular-nums transition-colors",
+                  rate === r
+                    ? "bg-[#e50914] text-white"
+                    : "text-white/80 hover:bg-white/10"
+                )}
+              >
+                {r}x
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Subtitles picker ---------- */}
+      {ccMenu && (
+        <div
+          role="menu"
+          aria-label="Subtitles"
+          className="styled-scrollbar absolute bottom-24 right-3 z-30 max-h-[60vh] w-64 overflow-y-auto rounded-[8px] bg-[#181818]/97 p-2 ring-1 ring-white/15 backdrop-blur md:right-8"
+        >
+          <p className="px-2 pb-2 pt-1 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+            Subtitles
+          </p>
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={!ccLang}
+            onClick={() => chooseCc(null)}
+            className={cn(
+              "flex w-full items-center justify-between rounded-[6px] px-2.5 py-2 text-[14px] font-semibold transition-colors",
+              !ccLang
+                ? "bg-white/10 text-[#e50914]"
+                : "text-white/85 hover:bg-white/5"
+            )}
+          >
+            Off
+            {!ccLang && <span className="h-2 w-2 rounded-full bg-[#e50914]" />}
+          </button>
+          {ccBusy && !ccOptions && (
+            <div className="flex justify-center py-4">
+              <Loader2
+                className="h-5 w-5 animate-spin text-[#e50914]"
+                aria-hidden
+              />
+            </div>
+          )}
+          {ccError && (
+            <p className="px-2.5 py-3 text-[13px] leading-relaxed text-[#ff9d9d]">
+              {ccError}
+            </p>
+          )}
+          {ccOptions?.langs.map((l) => (
+            <button
+              key={l.language}
+              type="button"
+              role="menuitemradio"
+              aria-checked={ccLang === l.language}
+              onClick={() => chooseCc(l.language)}
+              className={cn(
+                "flex w-full items-center justify-between gap-2 rounded-[6px] px-2.5 py-2 text-left text-[14px] transition-colors",
+                ccLang === l.language
+                  ? "bg-white/10 text-[#e50914]"
+                  : "text-white/85 hover:bg-white/5"
+              )}
+            >
+              <span className="truncate">{l.language}</span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                {l.best.isMachineTranslated && (
+                  <span className="rounded-[3px] bg-white/10 px-1 text-[10px] font-semibold text-white/50">
+                    Auto
+                  </span>
+                )}
+                {l.best.isHearingImpaired && (
+                  <span className="rounded-[3px] bg-white/10 px-1 text-[10px] font-semibold text-white/50">
+                    SDH
+                  </span>
+                )}
+                <span className="text-[11px] tabular-nums text-white/40">
+                  {l.count}
+                </span>
+              </span>
+            </button>
+          ))}
+          {ccOptions && ccOptions.langs.length === 0 && !ccBusy && !ccError && (
+            <p className="px-2.5 py-3 text-[13px] text-white/50">
+              No captions found for this title.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* ---------- Episode picker ---------- */}
       <AnimatePresence>

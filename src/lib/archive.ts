@@ -85,10 +85,25 @@ export function buildFileUrl(identifier: string, fileName: string): string {
   )}/${encodeURIComponent(fileName)}`;
 }
 
-/** Resolve a playable stream for an item: metadata → best mp4 */
+/** Find a caption file (prefer .vtt, fall back to .srt) if the item has one */
+function findSubtitleUrl(
+  meta: ArchiveMetadata,
+  identifier: string
+): string | null {
+  const file =
+    meta.files.find((f) => /\.vtt$/i.test(f.name)) ??
+    meta.files.find((f) => /\.srt$/i.test(f.name));
+  return file ? buildFileUrl(identifier, file.name) : null;
+}
+
+/** Resolve a playable stream for an item: metadata → best mp4 (+ captions) */
 export async function resolveStream(
   identifier: string
-): Promise<{ url: string; format: string } | null> {
+): Promise<{
+  url: string;
+  format: string;
+  subtitleUrl: string | null;
+} | null> {
   const meta = await fetchArchiveMetadata(identifier);
   const prefs = [
     "h.264 IA",
@@ -98,12 +113,17 @@ export async function resolveStream(
     "MPEG4",
     "Ogg Video",
   ];
+  const subtitleUrl = findSubtitleUrl(meta, identifier);
   for (const fmt of prefs) {
     const file = meta.files.find(
       (f) => f.format === fmt && /\.(mp4|ogv)$/i.test(f.name)
     );
     if (file) {
-      return { url: buildFileUrl(identifier, file.name), format: file.format };
+      return {
+        url: buildFileUrl(identifier, file.name),
+        format: file.format,
+        subtitleUrl,
+      };
     }
   }
   const anyVideo = meta.files.find(
@@ -113,6 +133,7 @@ export async function resolveStream(
     return {
       url: buildFileUrl(identifier, anyVideo.name),
       format: anyVideo.format,
+      subtitleUrl,
     };
   }
   return null;

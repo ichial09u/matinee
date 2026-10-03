@@ -18,10 +18,12 @@ import {
   Minimize,
   Loader2,
   ListVideo,
+  Captions,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { resolveStream } from "@/lib/archive";
 import { enterImmersive, isPortrait, isTouchDevice } from "@/lib/immersive";
+import { cueAt, fetchSubtitleCues, type Cue } from "@/lib/subtitles";
 
 export interface PlayerTrack {
   identifier: string;
@@ -48,6 +50,8 @@ function fmtTime(sec: number): string {
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+
+const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 
 /**
  * Custom remote-style video player.
@@ -85,6 +89,11 @@ export function VideoPlayer({
   const [buffering, setBuffering] = useState(false);
   const [showList, setShowList] = useState(false);
   const [portraitFallback, setPortraitFallback] = useState(false);
+  const [rate, setRate] = useState(1);
+  const [rateMenu, setRateMenu] = useState(false);
+  const [ccOn, setCcOn] = useState(false);
+  const [ccCues, setCcCues] = useState<Cue[]>([]);
+  const [ccBusy, setCcBusy] = useState(false);
   const autoImmersiveRef = useRef({ done: false, pending: false });
 
   /**
@@ -95,14 +104,20 @@ export function VideoPlayer({
   const [stream, setStream] = useState<{
     forId: string;
     url: string | null;
+    subUrl: string | null;
     error: string | null;
     resolving: boolean;
-  }>({ forId: "", url: null, error: null, resolving: false });
+  }>({ forId: "", url: null, subUrl: null, error: null, resolving: false });
 
   const active =
     track && stream.forId === track.identifier
       ? stream
-      : { url: null as string | null, error: null as string | null, resolving: true };
+      : {
+          url: null as string | null,
+          subUrl: null as string | null,
+          error: null as string | null,
+          resolving: true,
+        };
 
   const srcUrl = active.url;
   const error = active.error;
@@ -114,12 +129,17 @@ export function VideoPlayer({
     if (!id) return;
     let cancelled = false;
 
+    // captions don't carry over between films
+    setCcOn(false);
+    setCcCues([]);
+
     resolveStream(id)
       .then((res) => {
         if (cancelled) return;
         setStream({
           forId: id,
           url: res?.url ?? null,
+          subUrl: res?.subtitleUrl ?? null,
           error: res ? null : "No playable video file found for this item.",
           resolving: false,
         });
@@ -129,6 +149,7 @@ export function VideoPlayer({
         setStream({
           forId: id,
           url: null,
+          subUrl: null,
           error:
             "Could not reach Internet Archive. Check your connection and try again.",
           resolving: false,
@@ -215,6 +236,33 @@ export function VideoPlayer({
     setMuted(v.muted);
   }, []);
 
+  // Speed — picked from option tabs (no more cycling)
+  const applyRate = useCallback((r: number) => {
+    setRate(r);
+    setRateMenu(false);
+    const v = videoRef.current;
+    if (v) v.playbackRate = r;
+  }, []);
+
+  // Captions from the archive item's own subtitle file (if any)
+  const toggleCc = useCallback(() => {
+    if (ccOn) {
+      setCcOn(false);
+      setCcCues([]);
+      return;
+    }
+    if (!active.subUrl) return;
+    setCcOn(true);
+    setCcBusy(true);
+    fetchSubtitleCues(active.subUrl)
+      .then((cues) => setCcCues(cues))
+      .catch(() => {
+        setCcOn(false);
+        setCcCues([]);
+      })
+      .finally(() => setCcBusy(false));
+  }, [active.subUrl, ccOn]);
+
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -264,6 +312,10 @@ export function VideoPlayer({
         case "M":
           toggleMute();
           break;
+        case "c":
+        case "C":
+          toggleCc();
+          break;
         case "f":
         case "F":
           toggleFullscreen();
@@ -276,7 +328,7 @@ export function VideoPlayer({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, skip, toggleMute, toggleFullscreen, goNext]);
+  }, [togglePlay, skip, toggleMute, toggleCc, toggleFullscreen, goNext]);
 
   // ---------- Fullscreen state sync ----------
   useEffect(() => {
@@ -327,7 +379,7 @@ export function VideoPlayer({
         )}
       >
       {/* ---------- Video area ---------- */}
-      <div className="relative aspect-video w-full bg-black">
+      <div className="group/video relative aspect-video w-full bg-black">
         {error ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
             <p className="max-w-md text-[14px] leading-relaxed text-[#ff9d9d]">{error}</p>
@@ -336,12 +388,13 @@ export function VideoPlayer({
               className="rounded-[4px] bg-white px-5 py-2 text-[14px] font-bold text-black hover:bg-white/80"
               onClick={() => {
                 const id = track.identifier;
-                setStream({ forId: id, url: null, error: null, resolving: true });
+                setStream({ forId: id, url: null, subUrl: null, error: null, resolving: true });
                 resolveStream(id)
                   .then((res) =>
                     setStream({
                       forId: id,
                       url: res?.url ?? null,
+                      subUrl: res?.subtitleUrl ?? null,
                       error: res ? null : "No playable video file found for this item.",
                       resolving: false,
                     })
@@ -350,6 +403,7 @@ export function VideoPlayer({
                     setStream({
                       forId: id,
                       url: null,
+                      subUrl: null,
                       error: "Still unreachable. The archive may be blocked on this network.",
                       resolving: false,
                     })
@@ -376,7 +430,6 @@ export function VideoPlayer({
               playsInline
               autoPlay={autoPlay}
               preload="auto"
-              onClick={togglePlay}
               onPlay={() => {
                 setPlaying(true);
                 tryAutoImmersive(); // covers autoplay-started playback
@@ -388,6 +441,7 @@ export function VideoPlayer({
                 const v = e.currentTarget;
                 v.volume = volume;
                 v.muted = muted;
+                v.playbackRate = rate;
               }}
               onProgress={(e) => {
                 const v = e.currentTarget;
@@ -402,6 +456,7 @@ export function VideoPlayer({
                 setStream({
                   forId: track.identifier,
                   url: null,
+                  subUrl: null,
                   error: "The video failed to load. The file may be unavailable.",
                   resolving: false,
                 })
@@ -419,14 +474,80 @@ export function VideoPlayer({
               </div>
             )}
 
-            {/* Tap-to-toggle overlay hint (double purpose: pause when clicked) */}
-            <button
-              type="button"
-              aria-label={playing ? "Pause" : "Play"}
-              className="absolute inset-0 h-full w-full cursor-pointer"
-              onClick={togglePlay}
-              tabIndex={-1}
-            />
+            {/* ---------- Center controls: [-10s] [Play/Pause] [+10s] ----------
+                Always visible while paused; fade in on hover while playing.
+                A tap on the video itself never pauses — only these buttons
+                (or the bottom row) do. */}
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-0 z-[5] flex items-center justify-center transition-opacity duration-200",
+                playing ? "opacity-0 group-hover/video:opacity-100" : "opacity-100"
+              )}
+            >
+              <div
+                className={cn(
+                  "flex items-center gap-5 sm:gap-8",
+                  playing
+                    ? "group-hover/video:pointer-events-auto"
+                    : "pointer-events-auto"
+                )}
+              >
+                {/* Back 10s — left of the center play/pause */}
+                <button
+                  type="button"
+                  aria-label="Back 10 seconds"
+                  title="Back 10s (←)"
+                  className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+                  onClick={() => skip(-10)}
+                >
+                  <span className="relative flex h-12 w-12 items-center justify-center sm:h-14 sm:w-14">
+                    <RotateCcw className="h-10 w-10 sm:h-12 sm:w-12" aria-hidden />
+                    <span className="absolute text-[10px] font-black">10</span>
+                  </span>
+                </button>
+
+                {/* Play / Pause — the big center button */}
+                <button
+                  type="button"
+                  aria-label={playing ? "Pause" : "Play"}
+                  title={playing ? "Pause (Space)" : "Play (Space)"}
+                  onClick={togglePlay}
+                  className="flex h-16 w-16 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm transition-all hover:scale-105 hover:bg-black/65 active:scale-95 sm:h-[72px] sm:w-[72px]"
+                >
+                  {playing ? (
+                    <Pause className="h-9 w-9 fill-current" aria-hidden />
+                  ) : (
+                    <Play className="h-9 w-9 translate-x-0.5 fill-current" aria-hidden />
+                  )}
+                </button>
+
+                {/* Forward 10s — right of the center play/pause */}
+                <button
+                  type="button"
+                  aria-label="Forward 10 seconds"
+                  title="Forward 10s (→)"
+                  className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+                  onClick={() => skip(10)}
+                >
+                  <span className="relative flex h-12 w-12 items-center justify-center sm:h-14 sm:w-14">
+                    <RotateCw className="h-10 w-10 sm:h-12 sm:w-12" aria-hidden />
+                    <span className="absolute text-[10px] font-black">10</span>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* ---------- Closed captions overlay ---------- */}
+            {(() => {
+              const cue = ccCues.length > 0 ? cueAt(ccCues, current) : null;
+              return cue ? (
+                <div className="pointer-events-none absolute inset-x-0 bottom-3 z-[6] flex justify-center px-4">
+                  <p className="max-w-[85%] whitespace-pre-line rounded-[6px] bg-black/55 px-3 py-1 text-center text-[15px] font-medium leading-snug text-white [text-shadow:0_1px_4px_rgba(0,0,0,1)] sm:text-[17px]">
+                    {cue.text}
+                  </p>
+                </div>
+              ) : null;
+            })()}
           </>
         )}
 
@@ -445,7 +566,7 @@ export function VideoPlayer({
       {/* ============================================================
           CONTROL PANEL — buttons on top, progress bar BELOW buttons
          ============================================================ */}
-      <div className="space-y-3 bg-[#181818] p-3 sm:p-4">
+      <div className="relative space-y-3 bg-[#181818] p-3 sm:p-4">
         {/* --- Button row --- */}
         <div className="flex items-center gap-2 sm:gap-3">
           {/* Skip back 10s */}
@@ -561,6 +682,34 @@ export function VideoPlayer({
             )}
           </button>
 
+          {/* Closed captions (only when the archive item has a subtitle file) */}
+          {active.subUrl && (
+            <button
+              type="button"
+              aria-label={ccOn ? "Turn off captions" : "Turn on captions"}
+              aria-pressed={ccOn}
+              title="Captions (C)"
+              className={cn(
+                "flex h-11 w-11 items-center justify-center rounded-sm transition-colors hover:bg-white/10 sm:h-12 sm:w-12",
+                ccOn ? "text-primary" : "text-white"
+              )}
+              onClick={toggleCc}
+            >
+              <Captions className="h-5 w-5 sm:h-6 sm:w-6" aria-hidden />
+            </button>
+          )}
+
+          {/* Speed — opens option tabs */}
+          <button
+            type="button"
+            onClick={() => setRateMenu((o) => !o)}
+            aria-label={`Playback speed ${rate}x`}
+            aria-expanded={rateMenu}
+            className="min-w-[38px] rounded-sm px-1 text-[13px] font-bold tabular-nums text-white transition-colors hover:bg-white/10"
+          >
+            {rate}x
+          </button>
+
           {/* Playlist toggle */}
           <button
             type="button"
@@ -621,6 +770,45 @@ export function VideoPlayer({
             {fmtTime(duration)}
           </span>
         </div>
+
+        {/* --- Speed option tabs (floating above the panel) --- */}
+        {rateMenu && (
+          <>
+            <div
+              aria-hidden
+              className="fixed inset-0 z-20"
+              onClick={() => setRateMenu(false)}
+            />
+            <div
+              role="menu"
+              aria-label="Playback speed"
+              className="absolute bottom-full right-3 z-30 mb-2 rounded-[8px] bg-[#181818]/97 p-3 ring-1 ring-white/15 backdrop-blur"
+            >
+              <p className="px-1 pb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+                Speed
+              </p>
+              <div className="flex flex-wrap items-center gap-1">
+                {RATES.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={rate === r}
+                    onClick={() => applyRate(r)}
+                    className={cn(
+                      "rounded-[6px] px-3 py-1.5 text-[13px] font-bold tabular-nums transition-colors",
+                      rate === r
+                        ? "bg-primary text-primary-foreground"
+                        : "text-white/80 hover:bg-white/10"
+                    )}
+                  >
+                    {r}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* --- Playlist (switch films without leaving the player) --- */}
         {showList && (
