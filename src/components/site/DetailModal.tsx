@@ -14,6 +14,7 @@ import {
   Check,
   ThumbsUp,
   Loader2,
+  CalendarClock,
 } from "lucide-react";
 import {
   fetchDetails,
@@ -25,6 +26,7 @@ import {
   stillUrl,
 } from "@/lib/api";
 import { getProgress } from "@/lib/progress";
+import { countdownParts, prettyDate, isUnreleased } from "@/lib/release";
 import type { MediaItem, MediaDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +42,46 @@ interface DetailModalProps {
 }
 
 /* ---------- Shared bits ---------- */
+
+/** Live premiere countdown — ticks every second until release. */
+function ReleaseTimer({ date }: { date: string | null | undefined }) {
+  const [parts, setParts] = useState(() => countdownParts(date));
+  useEffect(() => {
+    const id = setInterval(() => setParts(countdownParts(date)), 1000);
+    return () => clearInterval(id);
+  }, [date]);
+
+  if (!parts) return null;
+  const cells = [
+    { v: parts.d, l: "days" },
+    { v: parts.h, l: "hrs" },
+    { v: parts.m, l: "min" },
+    { v: parts.s, l: "sec" },
+  ];
+  return (
+    <div className="inline-flex flex-col gap-1.5">
+      <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-white/70">
+        <CalendarClock className="h-3.5 w-3.5" aria-hidden />
+        Premieres {prettyDate(date)} · in
+      </span>
+      <div className="flex items-center gap-1.5">
+        {cells.map((c) => (
+          <div
+            key={c.l}
+            className="flex min-w-[52px] flex-col items-center rounded-[4px] bg-white/10 px-2 py-1.5 ring-1 ring-white/15 backdrop-blur-sm"
+          >
+            <span className="text-xl font-black tabular-nums text-white">
+              {String(c.v).padStart(2, "0")}
+            </span>
+            <span className="text-[9px] font-semibold uppercase tracking-[0.14em] text-white/50">
+              {c.l}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function MetaRow({
   match,
@@ -117,6 +159,7 @@ function KeyArtStage({
   title,
   logo,
   certification,
+  releaseDate,
   inList,
   onToggleList,
   onPlay,
@@ -126,6 +169,7 @@ function KeyArtStage({
   title: string;
   logo: string | null;
   certification: string | null | undefined;
+  releaseDate?: string | null;
   inList: boolean;
   onToggleList?: () => void;
   onPlay?: () => void;
@@ -134,6 +178,7 @@ function KeyArtStage({
   // Artwork fallback chain: backdrop → poster → gradient
   // (component is keyed per media, so the initial value never goes stale)
   const [artSrc, setArtSrc] = useState<string | null>(art || null);
+  const upcoming = isUnreleased(releaseDate);
 
   return (
     <div className="relative aspect-video w-full overflow-hidden bg-black">
@@ -170,15 +215,22 @@ function KeyArtStage({
             {title}
           </h2>
         )}
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={onPlay}
-            className="inline-flex items-center gap-2 rounded-[4px] bg-white px-6 py-1.5 text-[15px] font-bold text-black transition-colors hover:bg-white/75"
-          >
-            <Play className="h-5 w-5 fill-current" aria-hidden />
-            Play
-          </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {upcoming ? (
+            /* Not on CineSrc until it premieres — countdown instead of Play */
+            <div className="rounded-[4px] bg-black/40 px-4 py-2 ring-1 ring-white/15 backdrop-blur-sm">
+              <ReleaseTimer date={releaseDate} />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onPlay}
+              className="inline-flex items-center gap-2 rounded-[4px] bg-white px-6 py-1.5 text-[15px] font-bold text-black transition-colors hover:bg-white/75"
+            >
+              <Play className="h-5 w-5 fill-current" aria-hidden />
+              Play
+            </button>
+          )}
           <CircleButton
             label={inList ? "Remove from My List" : "Add to My List"}
             active={inList}
@@ -392,6 +444,7 @@ function DetailContent({
         title={detail.title}
         logo={detail.logo ? logoUrl(detail.logo, "w500") : null}
         certification={detail.certification}
+        releaseDate={detail.releaseDate}
         inList={Boolean(isInList?.(item.id, item.mediaType))}
         onToggleList={() => onToggleList?.(item)}
         onPlay={() => onPlay?.(item)}

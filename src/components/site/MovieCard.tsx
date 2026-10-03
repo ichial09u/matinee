@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Check, Play, Film } from "lucide-react";
+import { Plus, Check, Play, Film, CalendarClock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { posterUrl, backdropUrl, matchPercent } from "@/lib/api";
+import { isUnreleased, shortCountdown } from "@/lib/release";
 import type { MediaItem } from "@/lib/types";
 
 interface MovieCardProps {
@@ -55,9 +56,13 @@ export function MovieCard({
     orientation === "landscape" ? backdropUrl(item.backdrop, "w500") : posterUrl(item.poster);
   const ratio = orientation === "landscape" ? "aspect-video" : "aspect-[2/3]";
   const match = matchLabel(item.rating);
+  const upcoming = isUnreleased(item.releaseDate);
 
+  // Not out yet → clicking any play affordance opens the detail page
+  // (which carries the live premiere countdown) instead of playing.
   const open = () => onOpen?.(item);
-  const play = () => (onPlay ? onPlay(item) : onOpen?.(item));
+  const play = () =>
+    upcoming ? onOpen?.(item) : onPlay ? onPlay(item) : onOpen?.(item);
 
   return (
     <div
@@ -97,13 +102,24 @@ export function MovieCard({
             alt=""
             loading="lazy"
             onError={() => setImgError(true)}
-            className="h-full w-full object-cover"
+            className={cn(
+              "h-full w-full object-cover transition-[filter,opacity] duration-300",
+              upcoming && "opacity-80 saturate-[.7]"
+            )}
           />
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-2 text-center">
             <Film className="h-6 w-6 text-[#777]" aria-hidden />
             <span className="line-clamp-3 text-[11px] text-[#999]">{item.title}</span>
           </div>
+        )}
+
+        {/* Premiere countdown badge (unreleased titles aren't on CineSrc) */}
+        {upcoming && (
+          <span className="absolute left-1.5 top-1.5 z-10 flex items-center gap-1 rounded-[3px] bg-black/75 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white ring-1 ring-white/25 backdrop-blur-sm">
+            <CalendarClock className="h-3 w-3" aria-hidden />
+            {shortCountdown(item.releaseDate) ? `In ${shortCountdown(item.releaseDate)}` : "Soon"}
+          </span>
         )}
 
         {/* Row hover: info overlay inside the card (sliders clip overflow) */}
@@ -124,14 +140,26 @@ export function MovieCard({
             <div className="mt-2 flex items-center gap-2">
               <button
                 type="button"
-                aria-label={`Play ${item.title}`}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black transition hover:bg-white/80"
+                aria-label={
+                  upcoming ? `${item.title} — not released yet` : `Play ${item.title}`
+                }
+                title={upcoming ? "Premieres soon — not playable yet" : undefined}
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-full transition",
+                  upcoming
+                    ? "cursor-not-allowed bg-white/25 text-white/60"
+                    : "bg-white text-black hover:bg-white/80"
+                )}
                 onClick={(e) => {
                   e.stopPropagation();
                   play();
                 }}
               >
-                <Play className="h-3.5 w-3.5 translate-x-[1px] fill-current" aria-hidden />
+                {upcoming ? (
+                  <CalendarClock className="h-3.5 w-3.5" aria-hidden />
+                ) : (
+                  <Play className="h-3.5 w-3.5 translate-x-[1px] fill-current" aria-hidden />
+                )}
               </button>
               {onToggleList && (
                 <button
@@ -199,14 +227,25 @@ export function MovieCard({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  aria-label={`Play ${item.title}`}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-black transition hover:bg-white/80"
+                  aria-label={
+                    upcoming ? `${item.title} — not released yet` : `Play ${item.title}`
+                  }
+                  className={cn(
+                    "flex h-8 w-8 items-center justify-center rounded-full transition",
+                    upcoming
+                      ? "cursor-not-allowed bg-white/25 text-white/60"
+                      : "bg-white text-black hover:bg-white/80"
+                  )}
                   onClick={(e) => {
                     e.stopPropagation();
                     play();
                   }}
                 >
-                  <Play className="h-4 w-4 translate-x-[1px] fill-current" aria-hidden />
+                  {upcoming ? (
+                    <CalendarClock className="h-4 w-4" aria-hidden />
+                  ) : (
+                    <Play className="h-4 w-4 translate-x-[1px] fill-current" aria-hidden />
+                  )}
                 </button>
                 {onToggleList && (
                   <button

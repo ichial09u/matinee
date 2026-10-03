@@ -18,6 +18,7 @@ import {
   SkipForward,
   Loader2,
   Captions,
+  Cast,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchDetails, fetchSeason, stillUrl } from "@/lib/api";
@@ -143,10 +144,16 @@ export function PlayerView({
     active: false,
     ratio: 0,
   });
+  // Hover position over the scrub bar (0-1) — drives the time bubble
+  const [hoverRatio, setHoverRatio] = useState<number | null>(null);
 
   // Speed / captions popups (tabs instead of cycling)
   const [rateMenu, setRateMenu] = useState(false);
   const [ccMenu, setCcMenu] = useState(false);
+  // Cast / direct mode: reload the embed with its OWN controls visible so
+  // the stream's built-in Chromecast button can be used. Our shield and
+  // chrome step aside until the user exits.
+  const [castMode, setCastMode] = useState(false);
   const [ccLang, setCcLang] = useState<string | null>(null);
   const [ccOffset, setCcOffset] = useState(0); // seconds; + = captions later
   const [ccCues, setCcCues] = useState<Cue[]>([]);
@@ -168,6 +175,7 @@ export function PlayerView({
   const playingRef = useRef(false);
   const episodesOpenRef = useRef(false);
   const controlsVisibleRef = useRef(true);
+  const castModeRef = useRef(false);
   // Last authoritative timeupdate from the embed + the wall clock when it
   // arrived — the interpolation ticker extrapolates from here so captions
   // and the scrubber stay in sync between the (sparse) messages.
@@ -191,6 +199,9 @@ export function PlayerView({
     controlsVisibleRef.current = controlsVisible;
   }, [controlsVisible]);
   useEffect(() => {
+    castModeRef.current = castMode;
+  }, [castMode]);
+  useEffect(() => {
     rateMenuRef.current = rateMenu;
   }, [rateMenu]);
   useEffect(() => {
@@ -212,7 +223,9 @@ export function PlayerView({
       : `${CINESRC}/embed/movie/${item.id}`;
     const p = new URLSearchParams({
       color: "#e50914",
-      controls: "false",
+      // Cast mode trades our shield for the stream's own controls
+      // (the only way to reach its Chromecast button).
+      controls: castMode ? "true" : "false",
       prioritize: "true",
       // The embed is behind our click shield, so its Skip Intro button
       // can never be tapped — autoskip handles intros for us instead.
@@ -228,7 +241,7 @@ export function PlayerView({
     }
     if (src.nonce > 0) p.set("_r", String(src.nonce));
     return `${base}${base.includes("?") ? "&" : "?"}${p.toString()}`;
-  }, [isTv, item.id, src, initialServer]);
+  }, [isTv, item.id, src, initialServer, castMode]);
 
   // ---------- TV metadata ----------
   const detailQ = useQuery({
@@ -303,6 +316,7 @@ export function PlayerView({
   }, []);
 
   const poke = useCallback(() => {
+    if (castModeRef.current) return; // our chrome stays out of the way
     setControlsVisible(true);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     hideTimerRef.current = setTimeout(() => {
@@ -509,6 +523,37 @@ export function PlayerView({
     }
   }, []);
 
+  // ---------- cast / direct mode ----------
+  // CineSrc's embed API has no cast command — its Chromecast button lives
+  // in its own player UI. Cast mode reloads the embed with controls=true
+  // (keeping the position) and lifts our click shield so that UI — still
+  // sandboxed popup-free — can be used. Exit restores Matinee's player.
+  const enterCastMode = useCallback(() => {
+    const t = Math.floor(timeRef.current);
+    castModeRef.current = true;
+    setCastMode(true);
+    setReady(false);
+    setSrc((s) => ({ ...s, resume: Math.max(0, t), nonce: s.nonce + 1 }));
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    setControlsVisible(false);
+    setEpisodesOpen(false);
+    setRateMenu(false);
+    setCcMenu(false);
+  }, []);
+
+  const exitCastMode = useCallback(() => {
+    const t = Math.floor(timeRef.current);
+    castModeRef.current = false;
+    setCastMode(false);
+    setReady(false);
+    setSrc((s) => ({ ...s, resume: Math.max(0, t), nonce: s.nonce + 1 }));
+    setControlsVisible(true);
+    poke();
+  }, [poke]);
+
   // ---------- effects ----------
   // Lock page scroll while the player is up
   useEffect(() => {
@@ -602,7 +647,7 @@ export function PlayerView({
         case "cinesrc:pause":
           setPlaying(false);
           playingRef.current = false;
-          setControlsVisible(true);
+          if (!castModeRef.current) setControlsVisible(true);
           // Freeze the local clock at the pause point so interpolated
           // captions don't keep sliding while paused.
           lastSyncRef.current = {
@@ -695,7 +740,7 @@ export function PlayerView({
         case "cinesrc:ended":
           setPlaying(false);
           playingRef.current = false;
-          setControlsVisible(true);
+          if (!castModeRef.current) setControlsVisible(true);
           if (!isTv) {
             setEnded(true);
             removeProgress(key);
@@ -769,7 +814,9 @@ export function PlayerView({
           chooseCc(ccLang ? null : (lastCcLangRef.current ?? "English"));
           break;
         case "Escape":
-          if (rateMenuRef.current || ccMenuRef.current) {
+          if (castModeRef.current) {
+            exitCastMode();
+          } else if (rateMenuRef.current || ccMenuRef.current) {
             setRateMenu(false);
             setCcMenu(false);
           } else if (episodesOpenRef.current) {
@@ -785,6 +832,7 @@ export function PlayerView({
   }, [
     ccLang,
     chooseCc,
+    exitCastMode,
     goNext,
     hasNextEpisode,
     onBack,
@@ -920,20 +968,27 @@ export function PlayerView({
           it) never receives a click, so click-bait ads have nothing to
           intercept. A single tap toggles the controls (it never pauses);
           the buttons sit ABOVE this shield, so tapping them never toggles
-          the UI. touch-manipulation kills the browser's double-tap zoom. */}
-      <div
-        aria-hidden
-        className="absolute inset-0 z-[5] touch-manipulation"
-        onClick={onSurfaceClick}
-      />
-
-      {/* ---------- Center controls: [-10s] [Play/Pause] [+10s] ---------- */}
-      {ready && !error && (
+          the UI. touch-manipulation kills the browser's double-tap zoom.
+          Cast mode lifts the shield so the stream's own UI can be used. */}
+      {!castMode && (
         <div
-          className={cn(
-            "pointer-events-none absolute inset-0 z-[8] flex items-center justify-center transition-opacity duration-300",
-            controlsVisible ? "opacity-100" : "opacity-0"
-          )}
+          aria-hidden
+          className="absolute inset-0 z-[5] touch-manipulation"
+          onClick={onSurfaceClick}
+        />
+      )}
+
+      {/* ---------- Center controls: [-10s] [Play/Pause] [+10s] ----------
+          Springy motion, Netflix-style. Always hidden in cast mode. */}
+      {ready && !error && !castMode && (
+        <motion.div
+          initial={false}
+          animate={{
+            opacity: controlsVisible ? 1 : 0,
+            scale: controlsVisible ? 1 : 0.9,
+          }}
+          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+          className="pointer-events-none absolute inset-0 z-[8] flex items-center justify-center"
         >
           <div
             className={cn(
@@ -942,49 +997,58 @@ export function PlayerView({
             )}
           >
             {/* Back 10s — left of the center play/pause */}
-            <button
+            <motion.button
               type="button"
               aria-label="Back 10 seconds"
               title="Back 10s (←)"
+              whileHover={{ scale: 1.14 }}
+              whileTap={{ scale: 0.88 }}
+              transition={{ type: "spring", stiffness: 400, damping: 17 }}
               onClick={() => seekBy(-10)}
-              className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+              className="text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)]"
             >
               <span className="relative flex h-14 w-14 items-center justify-center sm:h-16 sm:w-16">
                 <RotateCcw className="h-12 w-12 sm:h-14 sm:w-14" aria-hidden />
                 <span className="absolute text-[11px] font-black">10</span>
               </span>
-            </button>
+            </motion.button>
 
             {/* Play / Pause — the big center button */}
-            <button
+            <motion.button
               type="button"
               aria-label={playing ? "Pause" : "Play"}
               title={playing ? "Pause (Space)" : "Play (Space)"}
               onClick={togglePlay}
-              className="flex h-[76px] w-[76px] items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm transition-all hover:scale-105 hover:bg-black/65 active:scale-95 sm:h-20 sm:w-20"
+              whileHover={{ scale: 1.07 }}
+              whileTap={{ scale: 0.9 }}
+              transition={{ type: "spring", stiffness: 400, damping: 17 }}
+              className="flex h-[76px] w-[76px] items-center justify-center rounded-full bg-black/50 text-white shadow-[0_4px_30px_rgba(0,0,0,0.6)] ring-1 ring-white/10 backdrop-blur-sm sm:h-20 sm:w-20"
             >
               {playing ? (
                 <Pause className="h-11 w-11 fill-current" aria-hidden />
               ) : (
                 <Play className="h-11 w-11 translate-x-0.5 fill-current" aria-hidden />
               )}
-            </button>
+            </motion.button>
 
             {/* Forward 10s — right of the center play/pause */}
-            <button
+            <motion.button
               type="button"
               aria-label="Forward 10 seconds"
               title="Forward 10s (→)"
+              whileHover={{ scale: 1.14 }}
+              whileTap={{ scale: 0.88 }}
+              transition={{ type: "spring", stiffness: 400, damping: 17 }}
               onClick={() => seekBy(10)}
-              className="text-white drop-shadow-lg transition-transform hover:scale-110 active:scale-95"
+              className="text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.9)]"
             >
               <span className="relative flex h-14 w-14 items-center justify-center sm:h-16 sm:w-16">
                 <RotateCw className="h-12 w-12 sm:h-14 sm:w-14" aria-hidden />
                 <span className="absolute text-[11px] font-black">10</span>
               </span>
-            </button>
+            </motion.button>
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* ---------- Closed captions overlay ----------
@@ -1101,12 +1165,13 @@ export function PlayerView({
       />
 
       {/* ---------- Top bar ---------- */}
-      <div
+      <motion.div
+        initial={false}
+        animate={{ opacity: controlsVisible ? 1 : 0, y: controlsVisible ? 0 : -10 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
         className={cn(
-          "absolute inset-x-0 top-0 z-10 flex items-start gap-4 p-4 transition-opacity duration-300 md:p-6",
-          controlsVisible
-            ? "opacity-100"
-            : "pointer-events-none opacity-0"
+          "absolute inset-x-0 top-0 z-10 flex items-start gap-4 p-4 md:p-6",
+          controlsVisible ? "" : "pointer-events-none"
         )}
       >
         <button
@@ -1128,13 +1193,16 @@ export function PlayerView({
             </p>
           )}
         </div>
-      </div>
+      </motion.div>
 
       {/* ---------- Bottom controls ---------- */}
-      <div
+      <motion.div
+        initial={false}
+        animate={{ opacity: controlsVisible ? 1 : 0, y: controlsVisible ? 0 : 12 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
         className={cn(
-          "absolute inset-x-0 bottom-0 z-10 transition-opacity duration-300",
-          controlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+          "absolute inset-x-0 bottom-0 z-10",
+          controlsVisible ? "" : "pointer-events-none"
         )}
       >
         <div className="px-4 pb-4 md:px-8 md:pb-6">
@@ -1152,7 +1220,12 @@ export function PlayerView({
             )} of ${fmt(duration)}`}
             tabIndex={0}
             onPointerDown={onTrackDown}
-            onPointerMove={onTrackMove}
+            onPointerMove={(e) => {
+              // Hover tooltip position (drag handled separately)
+              setHoverRatio(duration > 0 ? ratioFromEvent(e) : null);
+              onTrackMove(e);
+            }}
+            onPointerLeave={() => setHoverRatio(null)}
             onPointerUp={onTrackUp}
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") {
@@ -1165,6 +1238,16 @@ export function PlayerView({
             }}
             className="group/track relative flex h-6 cursor-pointer items-center"
           >
+            {/* Hover time bubble (Netflix-style scrub preview) */}
+            {hoverRatio != null && duration > 0 && !castMode && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute -top-9 z-10 -translate-x-1/2 rounded-[4px] bg-black/90 px-2 py-1 text-[12px] font-semibold tabular-nums text-white ring-1 ring-white/20"
+                style={{ left: `${hoverRatio * 100}%` }}
+              >
+                {fmt(hoverRatio * duration)}
+              </div>
+            )}
             <div className="relative h-[4px] w-full rounded-full bg-white/30 transition-all group-hover/track:h-[6px]">
               <div
                 className="absolute inset-y-0 left-0 rounded-full bg-[#e50914]"
@@ -1304,6 +1387,18 @@ export function PlayerView({
               {rate}x
             </button>
 
+            {/* Cast — hand the surface to the stream's own player UI
+                (its Chromecast button lives there) */}
+            <button
+              type="button"
+              onClick={enterCastMode}
+              aria-label="Cast and source options"
+              title="Cast — opens the stream's own player controls"
+              className="transition-transform hover:scale-110"
+            >
+              <Cast className="h-7 w-7" aria-hidden />
+            </button>
+
             <button
               type="button"
               aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
@@ -1318,7 +1413,28 @@ export function PlayerView({
             </button>
           </div>
         </div>
-      </div>
+      </motion.div>
+
+      {/* ---------- Cast mode pill ----------
+          The only Matinee chrome while the stream's own UI is up. */}
+      {castMode && (
+        <div className="absolute right-3 top-3 z-40 flex items-center gap-2.5 rounded-full bg-black/75 py-1.5 pl-3 pr-1.5 ring-1 ring-white/25 backdrop-blur-md">
+          <Cast className="h-4 w-4 text-[#e50914]" aria-hidden />
+          <span className="text-[12px] font-semibold text-white">
+            Cast mode
+            <span className="ml-1.5 hidden font-normal text-white/60 sm:inline">
+              · use the player's own buttons below
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={exitCastMode}
+            className="rounded-full bg-white px-3 py-1 text-[12px] font-bold text-black transition-colors hover:bg-white/80"
+          >
+            Exit
+          </button>
+        </div>
+      )}
 
       {/* ---------- Popups: outside-click shield ---------- */}
       {(rateMenu || ccMenu) && (
@@ -1334,9 +1450,13 @@ export function PlayerView({
 
       {/* ---------- Speed option tabs ---------- */}
       {rateMenu && (
-        <div
+        <motion.div
           role="menu"
           aria-label="Playback speed"
+          initial={{ opacity: 0, y: 10, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: "spring", stiffness: 500, damping: 32 }}
+          style={{ transformOrigin: "bottom right" }}
           className="absolute bottom-24 right-3 z-30 rounded-[8px] bg-[#181818]/97 p-3 ring-1 ring-white/15 backdrop-blur md:right-8"
         >
           <p className="px-1 pb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
@@ -1361,14 +1481,18 @@ export function PlayerView({
               </button>
             ))}
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* ---------- Subtitles picker ---------- */}
       {ccMenu && (
-        <div
+        <motion.div
           role="menu"
           aria-label="Subtitles"
+          initial={{ opacity: 0, y: 10, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: "spring", stiffness: 500, damping: 32 }}
+          style={{ transformOrigin: "bottom right" }}
           className="styled-scrollbar absolute bottom-24 right-3 z-30 max-h-[60vh] w-64 overflow-y-auto rounded-[8px] bg-[#181818]/97 p-2 ring-1 ring-white/15 backdrop-blur md:right-8"
         >
           <p className="px-2 pb-2 pt-1 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
@@ -1490,7 +1614,7 @@ export function PlayerView({
               No captions found for this title.
             </p>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* ---------- Episode picker ---------- */}

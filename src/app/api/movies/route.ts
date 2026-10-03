@@ -31,6 +31,7 @@ function normalizeList(raw: RawMedia[], mediaType: "movie" | "tv"): MediaItem[] 
       backdrop: m.backdrop_path || null,
       rating: m.vote_average ?? null,
       year: (m.release_date || m.first_air_date || "").slice(0, 4) || null,
+      releaseDate: m.release_date || m.first_air_date || null,
       mediaType,
       genreIds: m.genre_ids || [],
     }));

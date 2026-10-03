@@ -96,6 +96,7 @@ function toSimple(m: RawItem, type: "movie" | "tv") {
     backdrop: m.backdrop_path || null,
     rating: m.vote_average ?? null,
     year: (m.release_date || m.first_air_date || "").slice(0, 4) || null,
+    releaseDate: m.release_date || m.first_air_date || null,
     mediaType: type,
   };
 }

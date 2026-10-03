@@ -13,6 +13,7 @@ import {
   type ProgressEntry,
 } from "@/lib/progress";
 import type { MediaItem } from "@/lib/types";
+import { isUnreleased, prettyDate } from "@/lib/release";
 import { Header, type ViewName } from "@/components/site/Header";
 import { Hero } from "@/components/site/Hero";
 import { MovieCard, FreeMovieCard } from "@/components/site/MovieCard";
@@ -134,6 +135,14 @@ function MovieApp() {
   // ---------- Playback (cinesrc.st) ----------
   const playMedia = useCallback(
     (item: MediaItem, opts?: { season?: number; episode?: number }) => {
+      // Unreleased titles can't be on CineSrc yet — no stream to play
+      if (isUnreleased(item.releaseDate)) {
+        toast({
+          title: `${item.title} isn't out yet`,
+          description: `Premieres ${prettyDate(item.releaseDate)} — check back then.`,
+        });
+        return;
+      }
       if (item.mediaType === "tv") {
         const saved = getProgress(item);
         const season = opts?.season ?? saved?.season ?? 1;
@@ -145,7 +154,7 @@ function MovieApp() {
       setDetailOpen(false);
       window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
     },
-    []
+    [toast]
   );
 
   const closePlayer = useCallback(() => setPlayTarget(null), []);
@@ -614,7 +623,16 @@ function ContinueCard({
   return (
     <div className="group relative w-[110px] shrink-0 sm:w-[125px] md:w-[135px] lg:w-[150px]">
       <div className="relative">
-        <MovieCard item={item} fluid onPlay={() => onResume()} progress={progress} />
+        {/* Clicking the poster resumes — that's what a Continue Watching
+            card is for. (Previously no onOpen was passed, so taps on the
+            poster did nothing at all.) */}
+        <MovieCard
+          item={item}
+          fluid
+          onPlay={() => onResume()}
+          onOpen={() => onResume()}
+          progress={progress}
+        />
         <button
           type="button"
           aria-label={`Remove ${item.title} from Continue Watching`}

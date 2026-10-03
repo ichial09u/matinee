@@ -13,6 +13,8 @@ export interface MediaItem {
   year: string | null;
   mediaType: "movie" | "tv";
   genreIds?: number[];
+  /** TMDB release/first-air date "YYYY-MM-DD" — future = not on CineSrc yet */
+  releaseDate?: string | null;
 }
 
 /** Extended detail for a movie/show */
