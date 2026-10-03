@@ -19,9 +19,18 @@ import {
   Loader2,
   ListVideo,
   Captions,
+  Cast as CastIcon,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { resolveStream } from "@/lib/archive";
+import {
+  castLoadMedia,
+  getRemoteSnapshot,
+  remoteControls,
+  subscribeRemote,
+  useCast,
+} from "@/lib/cast";
 import { enterImmersive, isPortrait, isTouchDevice } from "@/lib/immersive";
 import { cueAt, fetchSubtitleCues, type Cue } from "@/lib/subtitles";
 
@@ -123,6 +132,29 @@ export function VideoPlayer({
   const error = active.error;
   const hasNext = index < playlist.length - 1;
 
+  // ---------- Google Cast (official Cast SDK sender) ----------
+  const {
+    state: castState,
+    deviceName,
+    requestSession: openCastPicker,
+    endSession: stopCasting,
+  } = useCast();
+  const casting = castState === "connected";
+  const [castError, setCastError] = useState<string | null>(null);
+  const [castBuffering, setCastBuffering] = useState(false);
+  // Bumped to re-load the receiver's media (speed change, captions toggle)
+  const [castReloadKey, setCastReloadKey] = useState(0);
+  const castingRef = useRef(false);
+  // srcUrl currently loaded on the receiver (guards double loads)
+  const castLoadedRef = useRef<string | null>(null);
+  const wasCastingRef = useRef(false);
+  const lastRemoteTimeRef = useRef(0);
+  const lastRemoteDurationRef = useRef(0);
+
+  useEffect(() => {
+    castingRef.current = casting;
+  }, [casting]);
+
   // ---------- Resolve the stream when the track changes ----------
   useEffect(() => {
     const id = track?.identifier;
@@ -130,8 +162,10 @@ export function VideoPlayer({
     let cancelled = false;
 
     // captions don't carry over between films
-    setCcOn(false);
-    setCcCues([]);
+    queueMicrotask(() => {
+      setCcOn(false);
+      setCcCues([]);
+    });
 
     resolveStream(id)
       .then((res) => {
@@ -160,6 +194,148 @@ export function VideoPlayer({
       cancelled = true;
     };
   }, [track?.identifier]);
+
+  // ---------- Google Cast: load the film once a session connects ----------
+  useEffect(() => {
+    if (!casting || !srcUrl || active.resolving || error) return;
+
+    // This exact film is already on the receiver (session rejoined after a
+    // reload) — sync to it instead of restarting.
+    const snap = getRemoteSnapshot();
+    if (snap.mediaLoaded && snap.mediaUrl === srcUrl) {
+      castLoadedRef.current = srcUrl;
+      queueMicrotask(() => {
+        setCurrent(snap.time);
+        if (snap.duration > 0) setDuration(snap.duration);
+        setPlaying(snap.playing);
+      });
+      return;
+    }
+    if (castLoadedRef.current === srcUrl) return;
+
+    // A DIFFERENT film was cast before → this is a track switch: start at 0.
+    // A same-url reload (speed / captions change) keeps the TV's position.
+    const switched =
+      Boolean(castLoadedRef.current) && castLoadedRef.current !== srcUrl;
+    castLoadedRef.current = srcUrl;
+    queueMicrotask(() => setCastError(null));
+    const localPos = videoRef.current?.currentTime ?? current ?? 0;
+    castLoadMedia({
+      url: srcUrl,
+      title: track?.title || "Matinee",
+      subtitle: track?.year
+        ? `${track.year} · Internet Archive`
+        : "Internet Archive · Public domain",
+      poster: track
+        ? `https://archive.org/services/img/${encodeURIComponent(
+            track.identifier
+          )}`
+        : undefined,
+      captions:
+        active.subUrl && /\.vtt($|\?)/i.test(active.subUrl)
+          ? { url: active.subUrl, language: "en", label: "English" }
+          : null,
+      activeCaptions: ccOn,
+      position: switched
+        ? 0
+        : lastRemoteTimeRef.current > 0
+          ? lastRemoteTimeRef.current
+          : localPos,
+      autoplay: true,
+      playbackRate: rate,
+    }).catch(() => setCastError("Couldn't start playback on the device."));
+  }, [
+    casting,
+    srcUrl,
+    active.resolving,
+    active.subUrl,
+    error,
+    track,
+    ccOn,
+    rate,
+    current,
+    castReloadKey,
+  ]);
+
+  // The local <video> steps aside while the film plays on the TV.
+  useEffect(() => {
+    if (!casting) return;
+    const v = videoRef.current;
+    if (v && !v.paused) v.pause();
+    queueMicrotask(() => setBuffered(0));
+  }, [casting, srcUrl]);
+
+  // Mirror the remote player onto our controls while casting.
+  useEffect(() => {
+    if (!casting) return;
+    let advanced = false;
+    const unsubscribe = subscribeRemote((s) => {
+      if (!castingRef.current) return;
+      setCastBuffering(s.buffering);
+      if (s.mediaLoaded) {
+        lastRemoteTimeRef.current = s.time;
+        lastRemoteDurationRef.current = s.duration;
+        setPlaying(s.playing);
+        if (s.time > 0) setCurrent(s.time);
+        if (s.duration > 0) setDuration(s.duration);
+        setVolume(s.volume);
+        setMuted(s.muted);
+      } else if (
+        lastRemoteDurationRef.current > 0 &&
+        lastRemoteTimeRef.current >= lastRemoteDurationRef.current - 5 &&
+        !advanced
+      ) {
+        // The film ended on the receiver — roll the playlist.
+        advanced = true;
+        if (hasNext && onIndexChange) onIndexChange(index + 1);
+      }
+    });
+    return unsubscribe;
+  }, [casting, hasNext, onIndexChange, index]);
+
+  // When casting stops, pick up locally where the TV left off.
+  useEffect(() => {
+    if (casting) {
+      wasCastingRef.current = true;
+      return;
+    }
+    if (!wasCastingRef.current) return;
+    wasCastingRef.current = false;
+    castLoadedRef.current = null;
+    queueMicrotask(() => {
+      setCastError(null);
+      setCastBuffering(false);
+    });
+    const t = lastRemoteTimeRef.current;
+    const v = videoRef.current;
+    if (v && t > 1) {
+      try {
+        v.currentTime =
+          Number.isFinite(v.duration) && v.duration > 0
+            ? Math.min(t, v.duration - 0.5)
+            : t;
+      } catch {
+        // seek raced metadata — the position still applied below
+      }
+      queueMicrotask(() => setCurrent(v.currentTime || t));
+      v.play()
+        .then(() => setPlaying(true))
+        .catch(() => undefined);
+    }
+    lastRemoteTimeRef.current = 0;
+    lastRemoteDurationRef.current = 0;
+  }, [casting]);
+
+  // Cast button — opens Google's official device picker; while casting,
+  // it disconnects instead.
+  const onCastClick = useCallback(() => {
+    setCastError(null);
+    if (castingRef.current) {
+      stopCasting();
+      return;
+    }
+    openCastPicker();
+  }, [openCastPicker, stopCasting]);
 
   // ---------- Next track (keeps the same <video> element) ----------
   const goNext = useCallback(() => {
@@ -206,6 +382,10 @@ export function VideoPlayer({
 
   // ---------- Playback controls ----------
   const togglePlay = useCallback(() => {
+    if (castingRef.current) {
+      remoteControls.playOrPause();
+      return;
+    }
     const v = videoRef.current;
     if (!v || !srcUrl) return;
     tryAutoImmersive(); // fresh gesture — retry the flip if needed
@@ -214,6 +394,10 @@ export function VideoPlayer({
   }, [srcUrl, tryAutoImmersive]);
 
   const skip = useCallback((delta: number) => {
+    if (castingRef.current) {
+      remoteControls.skip(delta);
+      return;
+    }
     const v = videoRef.current;
     if (!v || !Number.isFinite(v.duration)) return;
     const t = Math.min(Math.max(v.currentTime + delta, 0), v.duration);
@@ -222,6 +406,11 @@ export function VideoPlayer({
   }, []);
 
   const seekTo = useCallback((t: number) => {
+    if (castingRef.current) {
+      remoteControls.seekTo(t);
+      setCurrent(t);
+      return;
+    }
     const v = videoRef.current;
     if (!v || !Number.isFinite(v.duration)) return;
     const clamped = Math.min(Math.max(t, 0), v.duration);
@@ -230,29 +419,49 @@ export function VideoPlayer({
   }, []);
 
   const toggleMute = useCallback(() => {
+    if (castingRef.current) {
+      remoteControls.setMuted(!muted);
+      setMuted(!muted);
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     v.muted = !v.muted;
     setMuted(v.muted);
-  }, []);
+  }, [muted]);
 
   // Speed — picked from option tabs (no more cycling)
   const applyRate = useCallback((r: number) => {
     setRate(r);
     setRateMenu(false);
+    if (castingRef.current && castLoadedRef.current) {
+      // The receiver takes its rate on load — swap the media at the
+      // same position with the new speed.
+      castLoadedRef.current = null;
+      setCastReloadKey((k) => k + 1);
+      return;
+    }
     const v = videoRef.current;
     if (v) v.playbackRate = r;
   }, []);
 
   // Captions from the archive item's own subtitle file (if any)
   const toggleCc = useCallback(() => {
-    if (ccOn) {
-      setCcOn(false);
+    const next = !ccOn;
+    setCcOn(next);
+    if (castingRef.current && castLoadedRef.current) {
+      // Captions ride as a text track on the receiver — re-load the
+      // media with the track enabled/disabled.
+      castLoadedRef.current = null;
+      setCastReloadKey((k) => k + 1);
+      if (!next) setCcCues([]);
+      return;
+    }
+    if (!next) {
       setCcCues([]);
       return;
     }
     if (!active.subUrl) return;
-    setCcOn(true);
     setCcBusy(true);
     fetchSubtitleCues(active.subUrl)
       .then((cues) => setCcCues(cues))
@@ -428,7 +637,7 @@ export function VideoPlayer({
               src={srcUrl}
               className="h-full w-full bg-black"
               playsInline
-              autoPlay={autoPlay}
+              autoPlay={autoPlay && !casting}
               preload="auto"
               onPlay={() => {
                 setPlaying(true);
@@ -536,6 +745,37 @@ export function VideoPlayer({
                 </button>
               </div>
             </div>
+
+            {/* ---------- Casting to a device ----------
+                The film plays on the TV; this surface shows the connection
+                and a clear way out. */}
+            {casting && (
+              <div className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-2 bg-black/90 px-6 text-center">
+                {castBuffering ? (
+                  <Loader2
+                    className="h-10 w-10 animate-spin text-white/80"
+                    aria-hidden
+                  />
+                ) : (
+                  <CastIcon className="h-10 w-10 text-primary" aria-hidden />
+                )}
+                <p className="text-[15px] font-bold text-white">
+                  {castError || `Casting to ${deviceName || "your device"}`}
+                </p>
+                <p className="max-w-[80%] truncate text-[12px] text-white/60">
+                  {track?.title}
+                  {track?.year ? ` (${track.year})` : ""}
+                </p>
+                <button
+                  type="button"
+                  onClick={stopCasting}
+                  className="mt-2 flex items-center gap-1.5 rounded-[4px] bg-white px-4 py-1.5 text-[13px] font-bold text-black transition-colors hover:bg-white/80"
+                >
+                  <X className="h-4 w-4" aria-hidden />
+                  Disconnect
+                </button>
+              </div>
+            )}
 
             {/* ---------- Closed captions overlay ---------- */}
             {(() => {
@@ -660,12 +900,56 @@ export function VideoPlayer({
               const val = Number(e.target.value);
               setVolume(val);
               setMuted(val === 0);
+              if (castingRef.current) {
+                remoteControls.setVolume(val);
+                return;
+              }
               if (videoRef.current) {
                 videoRef.current.volume = val;
                 videoRef.current.muted = val === 0;
               }
             }}
           />
+
+          {/* Google Cast — opens Google's official device picker */}
+          <button
+            type="button"
+            aria-label={
+              casting
+                ? `Disconnect from ${deviceName || "cast device"}`
+                : "Cast to a device"
+            }
+            aria-pressed={casting}
+            title={
+              castState === "loading"
+                ? "Looking for cast devices…"
+                : castState === "no-devices"
+                  ? "No cast devices found"
+                  : casting
+                    ? `Casting to ${deviceName || "device"} — click to disconnect`
+                    : "Cast to a device"
+            }
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-sm transition-colors sm:h-12 sm:w-12",
+              castState === "no-devices" ||
+                castState === "unavailable" ||
+                castState === "loading"
+                ? "text-white/30"
+                : casting
+                  ? "text-primary hover:bg-white/10"
+                  : "text-white hover:bg-white/10"
+            )}
+            onClick={onCastClick}
+          >
+            {castState === "loading" ? (
+              <Loader2
+                className="h-5 w-5 animate-spin sm:h-6 sm:w-6"
+                aria-hidden
+              />
+            ) : (
+              <CastIcon className="h-5 w-5 sm:h-6 sm:w-6" aria-hidden />
+            )}
+          </button>
 
           {/* Fullscreen */}
           <button

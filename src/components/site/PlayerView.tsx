@@ -151,7 +151,7 @@ export function PlayerView({
   const [rateMenu, setRateMenu] = useState(false);
   const [ccMenu, setCcMenu] = useState(false);
   // Cast / direct mode: reload the embed with its OWN controls visible so
-  // the stream's built-in Chromecast button can be used. Our shield and
+  // the stream's built-in Google Cast button can be used. Our shield and
   // chrome step aside until the user exits.
   const [castMode, setCastMode] = useState(false);
   const [ccLang, setCcLang] = useState<string | null>(null);
@@ -224,7 +224,7 @@ export function PlayerView({
     const p = new URLSearchParams({
       color: "#e50914",
       // Cast mode trades our shield for the stream's own controls
-      // (the only way to reach its Chromecast button).
+      // (the only way to reach its built-in Google Cast button).
       controls: castMode ? "true" : "false",
       prioritize: "true",
       // The embed is behind our click shield, so its Skip Intro button
@@ -471,12 +471,12 @@ export function PlayerView({
   // changes so captions follow along.
   useEffect(() => {
     if (!ccLang) {
-      setCcCues([]);
+      queueMicrotask(() => setCcCues([]));
       return;
     }
     const controller = new AbortController();
     let cancelled = false;
-    setCcCues([]); // nothing stale while the new file loads
+    queueMicrotask(() => setCcCues([])); // nothing stale while the new file loads
     (async () => {
       try {
         const cached = ccOptionsRef.current;
@@ -524,8 +524,9 @@ export function PlayerView({
   }, []);
 
   // ---------- cast / direct mode ----------
-  // CineSrc's embed API has no cast command — its Chromecast button lives
-  // in its own player UI. Cast mode reloads the embed with controls=true
+  // The embed's stream is cross-origin — Matinee's own Google Cast sender
+  // can't get at the media URL, but the embed runs its own Cast button
+  // inside the frame. Cast mode reloads the embed with controls=true
   // (keeping the position) and lifts our click shield so that UI — still
   // sandboxed popup-free — can be used. Exit restores Matinee's player.
   const enterCastMode = useCallback(() => {
@@ -1387,13 +1388,15 @@ export function PlayerView({
               {rate}x
             </button>
 
-            {/* Cast — hand the surface to the stream's own player UI
-                (its Chromecast button lives there) */}
+            {/* Cast — hand the surface to the stream's own player UI.
+                Its built-in Google Cast button is the one that can move
+                that stream to the TV (the media URL is cross-origin, so
+                Matinee's own Cast sender can't reach it). */}
             <button
               type="button"
               onClick={enterCastMode}
-              aria-label="Cast and source options"
-              title="Cast — opens the stream's own player controls"
+              aria-label="Cast — open the stream's built-in Google Cast controls"
+              title="Cast — opens the stream's built-in Google Cast controls"
               className="transition-transform hover:scale-110"
             >
               <Cast className="h-7 w-7" aria-hidden />
@@ -1421,9 +1424,9 @@ export function PlayerView({
         <div className="absolute right-3 top-3 z-40 flex items-center gap-2.5 rounded-full bg-black/75 py-1.5 pl-3 pr-1.5 ring-1 ring-white/25 backdrop-blur-md">
           <Cast className="h-4 w-4 text-[#e50914]" aria-hidden />
           <span className="text-[12px] font-semibold text-white">
-            Cast mode
+            Google Cast
             <span className="ml-1.5 hidden font-normal text-white/60 sm:inline">
-              · use the player's own buttons below
+              · use the stream’s cast button below
             </span>
           </span>
           <button
