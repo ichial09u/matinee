@@ -148,6 +148,7 @@ export function PlayerView({
   const [rateMenu, setRateMenu] = useState(false);
   const [ccMenu, setCcMenu] = useState(false);
   const [ccLang, setCcLang] = useState<string | null>(null);
+  const [ccOffset, setCcOffset] = useState(0); // seconds; + = captions later
   const [ccCues, setCcCues] = useState<Cue[]>([]);
   const [ccOptions, setCcOptions] = useState<{
     key: string;
@@ -166,7 +167,11 @@ export function PlayerView({
   const itemRef = useRef(item);
   const playingRef = useRef(false);
   const episodesOpenRef = useRef(false);
-  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controlsVisibleRef = useRef(true);
+  // Last authoritative timeupdate from the embed + the wall clock when it
+  // arrived — the interpolation ticker extrapolates from here so captions
+  // and the scrubber stay in sync between the (sparse) messages.
+  const lastSyncRef = useRef<{ t: number; wall: number } | null>(null);
   const autoImmersiveRef = useRef({ done: false, pending: false });
   const rateMenuRef = useRef(false);
   const ccMenuRef = useRef(false);
@@ -183,6 +188,9 @@ export function PlayerView({
     episodesOpenRef.current = episodesOpen;
   }, [episodesOpen]);
   useEffect(() => {
+    controlsVisibleRef.current = controlsVisible;
+  }, [controlsVisible]);
+  useEffect(() => {
     rateMenuRef.current = rateMenu;
   }, [rateMenu]);
   useEffect(() => {
@@ -194,14 +202,6 @@ export function PlayerView({
   useEffect(() => {
     if (ccLang) lastCcLangRef.current = ccLang;
   }, [ccLang]);
-
-  // Kill a pending single-tap when the surface unmounts
-  useEffect(() => {
-    const t = tapTimerRef;
-    return () => {
-      if (t.current) clearTimeout(t.current);
-    };
-  }, []);
 
   const key = progressKey(item);
 
@@ -325,6 +325,7 @@ export function PlayerView({
       setDisplay({ season, episode });
       setTime(0);
       timeRef.current = 0;
+      lastSyncRef.current = null;
       setEnded(false);
       setReady(false);
       setPlaying(false);
@@ -340,6 +341,7 @@ export function PlayerView({
     setSrc((s) => ({ ...s, resume: 0, nonce: s.nonce + 1 }));
     setTime(0);
     timeRef.current = 0;
+    lastSyncRef.current = null;
     setEnded(false);
     setReady(false);
     setPlaying(false);
@@ -377,6 +379,9 @@ export function PlayerView({
       send("seek", [Math.floor(t)]);
       setTime(t);
       timeRef.current = t;
+      // Keep the interpolation clock from snapping back to the old spot
+      // before the embed confirms the seek.
+      lastSyncRef.current = { t, wall: performance.now() };
       setEnded(false);
       poke();
     },
@@ -545,6 +550,27 @@ export function PlayerView({
     return () => clearTimeout(t);
   }, []);
 
+  // Smooth local clock: interpolate the position between the embed's
+  // timeupdate messages. Those messages alone can arrive sparsely, which
+  // left captions lingering well after a line was spoken — the ticker
+  // keeps the position (and so the captions) in sync to a tenth of a
+  // second, snapping back to the truth on every message.
+  useEffect(() => {
+    if (!playing) return;
+    const id = setInterval(() => {
+      const sync = lastSyncRef.current;
+      if (!sync || drag.active) return;
+      const est = sync.t + (performance.now() - sync.wall) / 1000;
+      const maxT = durationRef.current - 0.05;
+      const t = maxT > 0 ? Math.min(est, maxT) : est;
+      if (Math.abs(t - timeRef.current) >= 0.2) {
+        timeRef.current = t;
+        setTime(t);
+      }
+    }, 200);
+    return () => clearInterval(id);
+  }, [playing, drag.active]);
+
   // Player events (postMessage from cinesrc.st)
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -577,12 +603,21 @@ export function PlayerView({
           setPlaying(false);
           playingRef.current = false;
           setControlsVisible(true);
+          // Freeze the local clock at the pause point so interpolated
+          // captions don't keep sliding while paused.
+          lastSyncRef.current = {
+            t: typeof data.currentTime === "number" && data.currentTime > 0
+              ? data.currentTime
+              : timeRef.current,
+            wall: performance.now(),
+          };
           break;
         case "cinesrc:timeupdate": {
           const t = Number(data.currentTime) || 0;
           const d = Number(data.duration) || 0;
           timeRef.current = t;
           durationRef.current = d;
+          lastSyncRef.current = { t, wall: performance.now() };
           if (!drag.active) setTime(t);
           if (d > 0) setDuration(d);
           const now = Date.now();
@@ -598,6 +633,7 @@ export function PlayerView({
           const d = Number(data.duration) || 0;
           timeRef.current = t;
           durationRef.current = d;
+          lastSyncRef.current = { t, wall: performance.now() };
           setTime(t);
           if (d > 0) setDuration(d);
           break;
@@ -638,6 +674,7 @@ export function PlayerView({
             setDisplay({ season: s, episode: e });
             timeRef.current = 0;
             setTime(0);
+            lastSyncRef.current = null;
             lastSaveRef.current = 0;
             if (isTv) {
               saveProgress({
@@ -816,6 +853,9 @@ export function PlayerView({
     send("seek", [t]);
     setTime(t);
     timeRef.current = t;
+    // Same as seekBy: don't let the interpolation clock snap back to the
+    // old spot before the embed confirms the seek.
+    lastSyncRef.current = { t, wall: performance.now() };
     setEnded(false);
     poke();
   };
@@ -823,23 +863,24 @@ export function PlayerView({
   const shownRatio =
     duration > 0 ? (drag.active ? drag.ratio : time / duration) : 0;
 
-  // ---------- surface taps: single = wake controls, double = fullscreen ----------
-  // A single tap NEVER pauses — pausing only happens on the center
-  // or bottom play/pause buttons (as requested).
+  // ---------- surface taps: one tap toggles the controls ----------
+  // A tap on the open surface flips the UI — visible goes hidden, hidden
+  // comes back (with the usual auto-hide while playing). Taps NEVER pause:
+  // only the center and bottom play/pause buttons do. There is deliberately
+  // no double-tap action — it used to exit fullscreen, which released the
+  // landscape lock and flipped the phone vertical.
   const onSurfaceClick = useCallback(() => {
     tryAutoImmersive(); // fresh user gesture — a good moment to retry
-    poke();
-    if (tapTimerRef.current) {
-      // second tap within the window → double tap = fullscreen
-      clearTimeout(tapTimerRef.current);
-      tapTimerRef.current = null;
-      toggleFullscreen();
+    if (controlsVisibleRef.current) {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+      setControlsVisible(false);
     } else {
-      tapTimerRef.current = setTimeout(() => {
-        tapTimerRef.current = null; // single tap: controls only
-      }, 250);
+      poke(); // show + arm the auto-hide timer while playing
     }
-  }, [poke, tryAutoImmersive, toggleFullscreen]);
+  }, [poke, tryAutoImmersive]);
 
   // ---------- render ----------
   return (
@@ -847,9 +888,8 @@ export function PlayerView({
       ref={wrapRef}
       role="region"
       aria-label={`Playing ${item.title}`}
-      className="fixed inset-0 z-[100] select-none bg-black"
+      className="fixed inset-0 z-[100] select-none touch-manipulation bg-black"
       onMouseMove={poke}
-      onPointerDown={poke}
       style={{ cursor: controlsVisible ? "default" : "none" }}
     >
       {/* Inner surface — neutral state is display:contents (zero layout
@@ -878,11 +918,12 @@ export function PlayerView({
       {/* Click shield — every pointer event on the video surface belongs to
           the Matinee player. The embed (and any fake "Play" overlays inside
           it) never receives a click, so click-bait ads have nothing to
-          intercept. A single tap only wakes the controls — it never pauses.
-          Double tap goes fullscreen. */}
+          intercept. A single tap toggles the controls (it never pauses);
+          the buttons sit ABOVE this shield, so tapping them never toggles
+          the UI. touch-manipulation kills the browser's double-tap zoom. */}
       <div
         aria-hidden
-        className="absolute inset-0 z-[5]"
+        className="absolute inset-0 z-[5] touch-manipulation"
         onClick={onSurfaceClick}
       />
 
@@ -946,9 +987,11 @@ export function PlayerView({
         </div>
       )}
 
-      {/* ---------- Closed captions overlay ---------- */}
+      {/* ---------- Closed captions overlay ----------
+          ccOffset shifts the caption timeline: + shows captions later,
+          − earlier (different releases run a few seconds apart). */}
       {(() => {
-        const cue = ccCues.length > 0 ? cueAt(ccCues, time) : null;
+        const cue = ccCues.length > 0 ? cueAt(ccCues, time - ccOffset) : null;
         return cue ? (
           <div
             className={cn(
@@ -1346,6 +1389,57 @@ export function PlayerView({
             Off
             {!ccLang && <span className="h-2 w-2 rounded-full bg-[#e50914]" />}
           </button>
+          {/* Caption timing — subtitle files from open indexes can be cut
+              a beat differently than the stream; let the viewer nudge
+              them back in sync (also covers any residual drift). */}
+          {ccLang && (
+            <div className="mt-1 border-t border-white/10 pt-2">
+              <div className="flex items-center justify-between px-2">
+                <span className="text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+                  Caption timing
+                </span>
+                {ccOffset !== 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setCcOffset(0)}
+                    className="text-[11px] font-semibold text-white/60 underline underline-offset-2 transition-colors hover:text-white"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+              <div className="mt-1.5 flex items-center gap-1 px-1">
+                <button
+                  type="button"
+                  aria-label="Show captions earlier"
+                  onClick={() =>
+                    setCcOffset((o) => Math.max(-30, +(o - 0.5).toFixed(1)))
+                  }
+                  className="flex-1 rounded-[6px] bg-white/10 px-2 py-1.5 text-[12px] font-semibold text-white/85 transition-colors hover:bg-white/20"
+                >
+                  − 0.5s
+                </button>
+                <span className="min-w-[54px] text-center text-[12px] font-bold tabular-nums text-white/70">
+                  {ccOffset > 0 ? "+" : ""}
+                  {ccOffset.toFixed(1)}s
+                </span>
+                <button
+                  type="button"
+                  aria-label="Show captions later"
+                  onClick={() =>
+                    setCcOffset((o) => Math.min(30, +(o + 0.5).toFixed(1)))
+                  }
+                  className="flex-1 rounded-[6px] bg-white/10 px-2 py-1.5 text-[12px] font-semibold text-white/85 transition-colors hover:bg-white/20"
+                >
+                  + 0.5s
+                </button>
+              </div>
+              <p className="mt-1 px-2 pb-1 text-[11px] leading-snug text-white/40">
+                Captions early or late? Shift them until they match the
+                voices.
+              </p>
+            </div>
+          )}
           {ccBusy && !ccOptions && (
             <div className="flex justify-center py-4">
               <Loader2
