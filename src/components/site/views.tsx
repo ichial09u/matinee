@@ -1,30 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Loader2,
-  Search as SearchIcon,
   ChevronLeft,
   ChevronRight,
-  WifiOff,
   Tv,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   discoverMedia,
   fetchGenres,
   fetchList,
   searchMedia,
-  fetchFreeMovies,
 } from "@/lib/api";
-import { searchArchiveMovies } from "@/lib/archive";
-import type { MediaItem, FreeMovie } from "@/lib/types";
-import { MovieCard, FreeMovieCard } from "./MovieCard";
+import type { MediaItem } from "@/lib/types";
+import { MovieCard } from "./MovieCard";
 import { SkeletonRow } from "./Row";
-import { VideoPlayer, type PlayerTrack } from "./VideoPlayer";
 
 // ============================================================
 // BROWSE (TMDB discover: genre / year / sort) — "Movies"
@@ -423,117 +417,6 @@ export function TvView({
 }
 
 // ============================================================
-// FREE MOVIES (Internet Archive, client-side)
-// ============================================================
-export function FreeView({
-  onPlay,
-}: {
-  onPlay: (identifier: string, list: FreeMovie[]) => void;
-}) {
-  const [movies, setMovies] = useState<FreeMovie[]>([]);
-  const [descs, setDescs] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
-  const [offline, setOffline] = useState(false);
-  const [query, setQuery] = useState("");
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      let cancelled = false;
-      setLoading(true);
-      searchArchiveMovies(1, 48, query)
-        .then((items) => {
-          if (cancelled) return;
-          setOffline(false);
-          setMovies(items);
-          const map: Record<string, string> = {};
-          for (const m of items) map[m.identifier] = m.description;
-          setDescs(map);
-        })
-        .catch(async () => {
-          if (cancelled) return;
-          // Archive unreachable — fall back to the curated catalog
-          try {
-            const items = await fetchFreeMovies();
-            if (cancelled) return;
-            setOffline(true);
-            setMovies(items);
-            const map: Record<string, string> = {};
-            for (const m of items) map[m.identifier] = m.description;
-            setDescs(map);
-          } catch {
-            if (!cancelled) setOffline(true);
-          }
-        })
-        .finally(() => !cancelled && setLoading(false));
-      return () => { cancelled = true; };
-    }, 400);
-    return () => clearTimeout(t);
-  }, [query]);
-
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white sm:text-4xl">Free Movies</h1>
-          <p className="mt-1 max-w-xl text-[14px] leading-relaxed text-[#777]">
-            Public-domain classics, streamed straight from the Internet Archive.
-            No account, no catch — just press play.
-          </p>
-        </div>
-        <div className="relative w-full sm:w-72">
-          <SearchIcon className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#777]" aria-hidden />
-          <Input
-            placeholder="Search the archive"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="rounded-[4px] border-white/20 bg-[#242424] pl-9 text-[14px] text-white placeholder:text-[#777]"
-            aria-label="Search free movies"
-          />
-        </div>
-      </div>
-
-      {offline && (
-        <div className="flex items-start gap-3 rounded-[4px] border border-[#e50914]/40 bg-[#e50914]/10 p-4 text-[14px] text-[#ff9d9d]">
-          <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p className="leading-relaxed">
-            Couldn&apos;t reach archive.org from this network, so the built-in
-            shelf of classics is standing in. Playback needs a connection to
-            the archive itself.
-          </p>
-        </div>
-      )}
-
-      {loading ? (
-        <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
-          {Array.from({ length: 10 }).map((_, i) => (
-            <div key={i} className="w-full">
-              <div className="aspect-[2/3] animate-pulse rounded-[4px] bg-[#222]" />
-              <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-[#222]" />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
-          {movies.map((m) => (
-            <FreeMovieCard
-              key={m.identifier}
-              movie={{
-                identifier: m.identifier,
-                title: m.title,
-                year: m.year ?? null,
-                description: m.description,
-              }}
-              onPlay={() => onPlay(m.identifier, movies)}
-              fluid
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================
 // MY LIST
 // ============================================================
 export function ListView({
@@ -549,7 +432,7 @@ export function ListView({
   onPlay: (item: MediaItem) => void;
   isInList: (id: number, type: string) => boolean;
   onToggleList: (item: MediaItem) => void;
-  onNavigate: (view: "home" | "free") => void;
+  onNavigate: (view: "home") => void;
 }) {
   if (list.length === 0) {
     return (
@@ -599,119 +482,6 @@ export function ListView({
           />
         ))}
       </div>
-    </div>
-  );
-}
-
-// ============================================================
-// WATCH (archive.org player view)
-// ============================================================
-export function WatchView({
-  playlist,
-  index,
-  onIndexChange,
-  onBack,
-}: {
-  playlist: PlayerTrack[];
-  index: number;
-  onIndexChange: (i: number) => void;
-  onBack: () => void;
-}) {
-  const track = playlist[index];
-  const [descMap, setDescMap] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let cancelled = false;
-    searchArchiveMovies(1, 48)
-      .then((items) => {
-        if (cancelled) return;
-        const map: Record<string, string> = {};
-        for (const m of items) map[m.identifier] = m.description;
-        setDescMap(map);
-      })
-      .catch(() => {
-        /* description is optional — ignore */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const currentDesc = track ? descMap[track.identifier] || "" : "";
-
-  if (!track) {
-    return (
-      <div className="py-24 text-center">
-        <p className="text-[15px] text-[#777]">Nothing on the reel.</p>
-        <Button
-          className="mt-4 rounded-[4px] bg-white px-6 font-semibold text-black hover:bg-white/80"
-          onClick={onBack}
-        >
-          ← Back to Free Movies
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-xl font-bold leading-tight text-white sm:text-2xl">
-            {track.title}
-          </h1>
-          <p className="mt-1 text-[13px] text-[#777]">
-            {track.year ? `${track.year} · ` : ""}Public domain · Internet Archive
-          </p>
-        </div>
-        <Button
-          variant="secondary"
-          onClick={onBack}
-          className="shrink-0 rounded-[4px] bg-[#2a2a2a] text-white hover:bg-[#3a3a3a]"
-        >
-          <ChevronLeft className="mr-1 h-4 w-4" aria-hidden />
-          Back
-        </Button>
-      </div>
-
-      {/* The player stays mounted while you switch films — nothing disconnects */}
-      <VideoPlayer
-        playlist={playlist}
-        index={index}
-        onIndexChange={onIndexChange}
-      />
-
-      {/* Description */}
-      {currentDesc && (
-        <section aria-label="About this film" className="max-w-3xl">
-          <h2 className="mb-2 text-[1.1rem] font-semibold text-white">
-            About {track.title}
-          </h2>
-          <p className="text-[14px] leading-relaxed text-[#b3b3b3]">{currentDesc}</p>
-        </section>
-      )}
-
-      {/* More like this */}
-      <section aria-label="More free films">
-        <h2 className="mb-4 text-[1.25rem] font-semibold text-[#e5e5e5]">
-          More Like This
-        </h2>
-        <div className="no-scrollbar flex gap-2 overflow-x-auto pb-2">
-          {playlist
-            .filter((_, i) => i !== index)
-            .slice(0, 16)
-            .map((m) => (
-              <FreeMovieCard
-                key={m.identifier}
-                movie={{ identifier: m.identifier, title: m.title, year: m.year ?? null, description: "" }}
-                onPlay={() => {
-                  const i = playlist.findIndex((p) => p.identifier === m.identifier);
-                  if (i >= 0) onIndexChange(i);
-                }}
-              />
-            ))}
-        </div>
-      </section>
     </div>
   );
 }

@@ -3,7 +3,7 @@
 // which run on a deployment-wide TMDB key (server-side only).
 // ============================================================
 
-import type { MediaItem, MediaDetail, Episode, FreeMovie } from "./types";
+import type { MediaItem, MediaDetail, Episode } from "./types";
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -96,10 +96,4 @@ export async function fetchSeason(
     `/api/tv/${id}/season/${season}`
   );
   return data.episodes;
-}
-
-// ---------- Free movies ----------
-export async function fetchFreeMovies(): Promise<FreeMovie[]> {
-  const data = await getJson<{ items: FreeMovie[] }>("/api/free/movies");
-  return data.items;
 }

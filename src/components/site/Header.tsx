@@ -7,7 +7,6 @@ import {
   Clapperboard,
   Home,
   Tv,
-  Play,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -15,10 +14,8 @@ export type ViewName =
   | "home"
   | "browse"
   | "tv"
-  | "free"
   | "search"
-  | "list"
-  | "watch";
+  | "list";
 
 interface HeaderProps {
   view: ViewName;
@@ -31,7 +28,6 @@ const NAV: { id: ViewName; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "tv", label: "TV Shows" },
   { id: "browse", label: "Movies" },
-  { id: "free", label: "Free Movies" },
   { id: "list", label: "My List" },
 ];
 
@@ -39,7 +35,6 @@ const MOBILE_TABS: { id: ViewName; label: string; icon: typeof Home }[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "tv", label: "TV", icon: Tv },
   { id: "browse", label: "Movies", icon: Clapperboard },
-  { id: "free", label: "Free", icon: Play },
   { id: "list", label: "My List", icon: Bookmark },
 ];
 
@@ -230,9 +225,9 @@ export function Header({
                       action: () => onNavigate("tv"),
                     },
                     {
-                      label: "Free Movies",
-                      icon: Play,
-                      action: () => onNavigate("free"),
+                      label: "Movies",
+                      icon: Clapperboard,
+                      action: () => onNavigate("browse"),
                     },
                   ].map((mi) => (
                     <button

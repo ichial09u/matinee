@@ -64,14 +64,6 @@ export interface Episode {
   rating: number | null;
 }
 
-/** Public-domain film from Internet Archive (playable, keyless) */
-export interface FreeMovie {
-  identifier: string;
-  title: string;
-  year: number | null;
-  description: string;
-}
-
 export interface ApiError {
   error: string;
   code?: number;

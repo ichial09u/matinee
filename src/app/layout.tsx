@@ -23,14 +23,14 @@ const FAVICON =
 export const metadata: Metadata = {
   title: "Matinee — Watch Movies and TV Shows Online",
   description:
-    "Watch movies and TV shows online. Trending films, episode guides, and a shelf of free classics — streaming on any screen. Powered by TMDB, TVMaze and the Internet Archive.",
-  keywords: ["movies", "TV shows", "watch online", "trailers", "free movies"],
+    "Watch movies and TV shows online. Trending films, episode guides, and trailers — streaming on any screen. Powered by TMDB and TVMaze.",
+  keywords: ["movies", "TV shows", "watch online", "trailers"],
   authors: [{ name: "Matinee" }],
   icons: { icon: FAVICON },
   openGraph: {
     title: "Matinee — Watch Movies and TV Shows Online",
     description:
-      "Trending movies, TV worth staying up for, and public-domain classics — no accounts, no trackers.",
+      "Trending movies and TV worth staying up for — no accounts, no trackers.",
     siteName: "Matinee",
     type: "website",
   },

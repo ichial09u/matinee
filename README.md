@@ -1,6 +1,6 @@
 # Matinee
 
-A Netflix-style streaming site for movies, TV shows, and public-domain classics.
+A Netflix-style streaming site for movies and TV shows.
 Browse trending titles, open a detail page, and hit Play — playback runs inside
 Matinee's own player on top of a sandboxed, popup-proof embed.
 
@@ -10,12 +10,10 @@ Matinee's own player on top of a sandboxed, popup-proof embed.
 
 - **Netflix-style UI** — billboard hero, poster rows, Top 10 with big rank
   numerals, hover cards, preview modal, bottom tab bar on mobile.
-- **Three data sources, zero setup** —
+- **Two data sources, zero setup** —
   - [TMDB](https://www.themoviedb.org/) for movies & TV (trending, popular,
     top-rated, search, details, similar titles)
   - [TVMaze](https://www.tvmaze.com/) for TV episode guides
-  - [Internet Archive](https://archive.org/) for a shelf of free,
-    public-domain feature films that play in a built-in HTML5 player
 - **In-house player** — playback, progress bar, ±10s skip, volume, speed,
   next episode, episode picker, and Continue Watching stored locally.
   The stream embed is sandboxed **without** `allow-popups`, sits behind a
@@ -33,7 +31,7 @@ Matinee's own player on top of a sandboxed, popup-proof embed.
 Everything works with **no environment variables and no accounts**:
 
 - The TMDB read key ships with the code.
-- TVMaze and the Internet Archive are keyless.
+- TVMaze is keyless.
 - Watchlists, Continue Watching, and playback progress live in the
   browser's `localStorage` — no database required.
 
@@ -69,7 +67,7 @@ redeploys automatically — no new links.
 src/
   app/                 # home page + API routes (/api/movies, /api/tv, ...)
   components/site/     # Header, Hero, rows, cards, detail modal, players
-  lib/                 # TMDB / TVMaze / Archive clients, progress, helpers
+  lib/                 # TMDB / TVMaze clients, progress, helpers
 public/                # icons
 prisma/                # schema (unused at runtime — no DB needed)
 ```
@@ -80,5 +78,4 @@ prisma/                # schema (unused at runtime — no DB needed)
   availability; the player shows a friendly error with a retry when a
   source can't be reached.
 - This project is for personal/educational use. Content metadata comes
-  from TMDB / TVMaze; free films are public-domain titles from the
-  Internet Archive.
+  from TMDB / TVMaze.

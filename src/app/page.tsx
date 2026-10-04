@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { fetchList } from "@/lib/api";
-import { searchArchiveMovies } from "@/lib/archive";
-import { FREE_MOVIES } from "@/lib/free-movies";
 import {
   listProgress,
   removeProgress,
@@ -16,7 +14,7 @@ import type { MediaItem } from "@/lib/types";
 import { isUnreleased, prettyDate } from "@/lib/release";
 import { Header, type ViewName } from "@/components/site/Header";
 import { Hero } from "@/components/site/Hero";
-import { MovieCard, FreeMovieCard } from "@/components/site/MovieCard";
+import { MovieCard } from "@/components/site/MovieCard";
 import { Row, Top10Row, SkeletonRow } from "@/components/site/Row";
 import { DetailModal } from "@/components/site/DetailModal";
 import { PlayerView, type PlayTarget } from "@/components/site/PlayerView";
@@ -24,9 +22,7 @@ import {
   BrowseView,
   SearchView,
   TvView,
-  FreeView,
   ListView,
-  WatchView,
 } from "@/components/site/views";
 
 const LIST_STORAGE = "moviebox_my_list";
@@ -65,12 +61,6 @@ function MovieApp() {
 
   // Player (full-screen cinesrc overlay)
   const [playTarget, setPlayTarget] = useState<PlayTarget | null>(null);
-
-  // Free (archive.org) player view
-  const [watchlist, setWatchlist] = useState<
-    { identifier: string; title: string; year: number | null }[]
-  >([]);
-  const [watchIndex, setWatchIndex] = useState(0);
 
   // ---------- Boot: restore saved state ----------
   useEffect(() => {
@@ -187,23 +177,6 @@ function MovieApp() {
     window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
   }, []);
 
-  const startWatching = useCallback(
-    (
-      identifier: string,
-      list: { identifier: string; title: string; year: number | null; description?: string }[]
-    ) => {
-      const idx = Math.max(
-        0,
-        list.findIndex((m) => m.identifier === identifier)
-      );
-      setWatchlist(list);
-      setWatchIndex(idx);
-      setView("watch");
-      window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
-    },
-    []
-  );
-
   // ---------- Home queries ----------
   const onHome = view === "home";
 
@@ -237,8 +210,6 @@ function MovieApp() {
     queryFn: () => fetchList("trending", 1, "tv"),
     enabled: onHome,
   });
-
-  const freeRow = useArchiveCatalog();
 
   return (
     <div className="flex min-h-screen flex-col pb-14 md:pb-0">
@@ -429,42 +400,6 @@ function MovieApp() {
                 ))}
               </Row>
             )}
-
-            {/* Free movies row (public domain classics) */}
-            <Row
-              title="Free Movies"
-              action={
-                <button
-                  type="button"
-                  onClick={() => navigate("free")}
-                  className="ml-2 shrink-0 text-[12px] font-semibold text-[#b3b3b3] transition-colors hover:text-white"
-                >
-                  Explore all ›
-                </button>
-              }
-            >
-              {(freeRow.loading ? Array.from({ length: 8 }) : freeRow.movies.slice(0, 12)).map(
-                (_, i) => {
-                  if (freeRow.loading) {
-                    return (
-                      <div
-                        key={i}
-                        className="aspect-[2/3] w-[110px] shrink-0 animate-pulse rounded-[4px] bg-[#222] sm:w-[125px] md:w-[135px] lg:w-[150px]"
-                      />
-                    );
-                  }
-                  const m = freeRow.movies[i];
-                  if (!m) return null;
-                  return (
-                    <FreeMovieCard
-                      key={m.identifier}
-                      movie={m}
-                      onPlay={() => startWatching(m.identifier, freeRow.movies)}
-                    />
-                  );
-                }
-              )}
-            </Row>
           </div>
         )}
 
@@ -489,8 +424,6 @@ function MovieApp() {
               />
             )}
 
-            {view === "free" && <FreeView onPlay={startWatching} />}
-
             {view === "search" && (
               <SearchView
                 key={searchQuery}
@@ -512,15 +445,6 @@ function MovieApp() {
                 onNavigate={navigate}
               />
             )}
-
-            {view === "watch" && (
-              <WatchView
-                playlist={watchlist}
-                index={watchIndex}
-                onIndexChange={setWatchIndex}
-                onBack={() => navigate("free")}
-              />
-            )}
           </div>
         )}
       </main>
@@ -530,8 +454,7 @@ function MovieApp() {
         <div className="mx-auto max-w-[1000px] px-4 py-10 text-[13px] text-[#808080] md:px-6">
           <p className="mb-6">
             Questions? Everything here runs on public APIs — TMDB for the
-            catalog, the Internet Archive for the free classics, CineSrc for
-            the streams.
+            catalog, TVMaze for episode guides, CineSrc for the streams.
           </p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 md:grid-cols-4">
             <div className="space-y-3">
@@ -540,9 +463,6 @@ function MovieApp() {
               </button>
               <button type="button" className="block hover:underline" onClick={() => navigate("browse")}>
                 Movies
-              </button>
-              <button type="button" className="block hover:underline" onClick={() => navigate("free")}>
-                Free Movies
               </button>
             </div>
             <div className="space-y-3">
@@ -557,8 +477,8 @@ function MovieApp() {
               <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer" className="block hover:underline">
                 TMDB
               </a>
-              <a href="https://archive.org/details/featurefilms" target="_blank" rel="noopener noreferrer" className="block hover:underline">
-                Internet Archive
+              <a href="https://www.tvmaze.com" target="_blank" rel="noopener noreferrer" className="block hover:underline">
+                TVMaze
               </a>
               <a href="https://cinesrc.st" target="_blank" rel="noopener noreferrer" className="block hover:underline">
                 CineSrc
@@ -654,30 +574,4 @@ function ContinueCard({
       </div>
     </div>
   );
-}
-
-// ============================================================
-// Client-side archive catalog hook (home row)
-// ============================================================
-function useArchiveCatalog() {
-  const [movies, setMovies] = useState(FREE_MOVIES);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    searchArchiveMovies(1, 24)
-      .then((items) => {
-        if (cancelled || items.length === 0) return;
-        setMovies(items);
-      })
-      .catch(() => {
-        /* keep curated fallback */
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return { movies, loading };
 }
