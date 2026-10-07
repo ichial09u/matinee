@@ -19,6 +19,8 @@ import {
   Loader2,
   Captions,
   Cast,
+  Server,
+  ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchDetails, fetchSeason, stillUrl } from "@/lib/api";
@@ -32,16 +34,38 @@ import {
   type SubtitleLang,
 } from "@/lib/subtitles";
 import type { MediaItem, Episode } from "@/lib/types";
+import {
+  PROVIDERS,
+  getProvider,
+  storedSource,
+  storeSource,
+  storedAudio,
+  storeAudio,
+  type SourceId,
+  type AnimeAudio,
+} from "@/lib/embeds";
+import { isAnime, resolveAnime, type AnimeMapping } from "@/lib/anime";
 
 // ============================================================
-// Matinee's own player, Netflix style, on top of a CineSrc
-// (cinesrc.st) embed. The embed runs with controls=false and is
-// sandboxed with NO allow-popups, so provider popup ads can't
-// open windows; a full-surface click shield keeps every pointer
-// event for this player — the embed never sees a click. All chrome
-// lives here: progress bar, play/pause, ±10s, volume, speed, next
-// episode, episode picker and fullscreen. Communication is
-// postMessage both ways (verified against cinesrc.st/docs).
+// Matinee's player. Streams come from swappable embed sources
+// (VidLink by default — fast, plus 2Embed / MultiEmbed / VidSrc
+// backups, and CineSrc for the full in-house chrome).
+//
+// Two playback modes:
+//  • Matinee chrome (CineSrc) — the embed runs controls=false
+//    behind our click shield; every button you see is ours.
+//    Communication is two-way postMessage (cinesrc:command /
+//    cinesrc:* events).
+//  • Direct mode (all other sources) — the embed's own player
+//    UI runs inside our sandboxed iframe (no allow-popups, so
+//    provider ads can never open windows). VidLink additionally
+//    posts PLAYER_EVENTs back, which we use to save progress,
+//    track play state and follow its internal episode navigation.
+//
+// Anime (Japanese animation) additionally routes through
+// VidLink's anime path — https://vidlink.pro/anime/{MALid}/{ep}/
+// {sub|dub} — giving a SUB/DUB toggle. MAL ids are resolved via
+// AniList from the TMDB title (see lib/anime.ts).
 // ============================================================
 
 export interface PlayTarget {
@@ -51,7 +75,8 @@ export interface PlayTarget {
   episode?: number;
 }
 
-const CINESRC = "https://cinesrc.st";
+const CINESRC = "https://cinesrc.st"; // postMessage targetOrigin for the CineSrc protocol
+const VIDLINK = "https://vidlink.pro";
 const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 // The cinesrc server that last worked for this browser — replaying
 // it on the next session skips most of the source-selection wait.
@@ -150,6 +175,16 @@ export function PlayerView({
   // Speed / captions popups (tabs instead of cycling)
   const [rateMenu, setRateMenu] = useState(false);
   const [ccMenu, setCcMenu] = useState(false);
+  // ---------- source & anime ----------
+  // Which embed provider is playing (persisted; VidLink default —
+  // the fast one). Anime additionally tracks sub/dub + the MAL
+  // mapping for VidLink's anime path.
+  const [source, setSource] = useState<SourceId>(() => storedSource());
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [animeAudio, setAnimeAudio] = useState<AnimeAudio>(() => storedAudio());
+  const [animeMap, setAnimeMap] = useState<AnimeMapping | null>(null);
+  const [animeFailed, setAnimeFailed] = useState(false);
+
   // Cast / direct mode: reload the embed with its OWN controls visible so
   // the stream's built-in Google Cast button can be used. Our shield and
   // chrome step aside until the user exits.
@@ -176,6 +211,9 @@ export function PlayerView({
   const episodesOpenRef = useRef(false);
   const controlsVisibleRef = useRef(true);
   const castModeRef = useRef(false);
+  // True whenever the embed's own UI is in charge (non-CineSrc source,
+  // or CineSrc cast mode) — Matinee's chrome is hidden then.
+  const directModeRef = useRef(false);
   // Last authoritative timeupdate from the embed + the wall clock when it
   // arrived — the interpolation ticker extrapolates from here so captions
   // and the scrubber stay in sync between the (sparse) messages.
@@ -202,6 +240,9 @@ export function PlayerView({
     castModeRef.current = castMode;
   }, [castMode]);
   useEffect(() => {
+    directModeRef.current = source !== "cinesrc" || castMode;
+  }, [source, castMode]);
+  useEffect(() => {
     rateMenuRef.current = rateMenu;
   }, [rateMenu]);
   useEffect(() => {
@@ -215,33 +256,6 @@ export function PlayerView({
   }, [ccLang]);
 
   const key = progressKey(item);
-
-  // ---------- embed URL ----------
-  const embedUrl = useMemo(() => {
-    const base = isTv
-      ? `${CINESRC}/embed/tv/${item.id}?s=${src.season}&e=${src.episode}`
-      : `${CINESRC}/embed/movie/${item.id}`;
-    const p = new URLSearchParams({
-      color: "#e50914",
-      // Cast mode trades our shield for the stream's own controls
-      // (the only way to reach its built-in Google Cast button).
-      controls: castMode ? "true" : "false",
-      prioritize: "true",
-      // The embed is behind our click shield, so its Skip Intro button
-      // can never be tapped — autoskip handles intros for us instead.
-      autoskip: "true",
-    });
-    // Go straight to the server that worked last time — cuts most
-    // of the "connecting…" wait on repeat plays.
-    if (initialServer) p.set("lastserver", initialServer);
-    if (src.resume > 45) {
-      p.set("t", String(src.resume));
-      // We run our own resume UX — skip the embed's Continue/Restart prompt
-      p.set("continueprompt", "false");
-    }
-    if (src.nonce > 0) p.set("_r", String(src.nonce));
-    return `${base}${base.includes("?") ? "&" : "?"}${p.toString()}`;
-  }, [isTv, item.id, src, initialServer, castMode]);
 
   // ---------- TV metadata ----------
   const detailQ = useQuery({
@@ -271,6 +285,99 @@ export function PlayerView({
     isTv &&
     (display.episode < (currentSeasonEntry?.episodeCount ?? 0) ||
       display.season < maxSeason);
+
+  // ---------- anime detection ----------
+  // Cheap check from list data (language + genre); the detail query's
+  // keywords ("anime" = 210024) sharpen it once loaded.
+  const animeDetected = useMemo(
+    () =>
+      isAnime({
+        genreIds: item.genreIds,
+        keywords: detailQ.data?.keywords,
+        originalLanguage:
+          item.originalLanguage ?? detailQ.data?.originalLanguage ?? null,
+      }),
+    [item, detailQ.data]
+  );
+
+  // ---------- embed URL ----------
+  const provider = getProvider(source);
+  // Matinee's full control surface — only possible on CineSrc (it is
+  // the one source with a two-way postMessage API).
+  const matineeChrome = source === "cinesrc" && !castMode;
+  // True when playback rides VidLink's dedicated anime path right now.
+  // (Computed un-narrowed so both chrome and direct-mode UI can use it.)
+  const animePathActive = source === "vidlink" && Boolean(animeMap);
+
+  const embedUrl = useMemo(() => {
+    // Anime on VidLink rides the dedicated MAL-keyed path with sub/dub;
+    // while the MAL id is still being resolved (or failed to resolve)
+    // the regular movie/TV path plays, so playback never waits.
+    const useAnime = animeDetected && source === "vidlink" && animeMap;
+    return provider.buildUrl({
+      kind: isTv ? "tv" : "movie",
+      tmdbId: item.id,
+      season: src.season,
+      episode: src.episode,
+      anime: useAnime
+        ? { malId: animeMap.malId, episode: animeMap.episode }
+        : null,
+      audio: useAnime ? animeAudio : undefined,
+      startAt: src.resume,
+      castMode: source === "cinesrc" ? castMode : false,
+      lastServer: source === "cinesrc" ? initialServer : null,
+      nonce: src.nonce,
+    });
+  }, [
+    provider,
+    isTv,
+    item.id,
+    src,
+    castMode,
+    initialServer,
+    source,
+    animeDetected,
+    animeMap,
+    animeAudio,
+  ]);
+
+  // ---------- anime: resolve the TMDB → MAL mapping ----------
+  // Runs whenever the season changes (each season can map to its own
+  // MAL entry); results are cached, so this is usually instant.
+  useEffect(() => {
+    if (!animeDetected || source !== "vidlink") return;
+    let cancelled = false;
+    resolveAnime({
+      tmdbId: item.id,
+      title: item.title,
+      kind: isTv ? "tv" : "movie",
+      season: src.season,
+      episode: src.episode,
+      seasonsList,
+    })
+      .then((m) => {
+        if (cancelled) return;
+        setAnimeMap(m);
+        setAnimeFailed(!m);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAnimeMap(null);
+        setAnimeFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    animeDetected,
+    source,
+    item.id,
+    item.title,
+    isTv,
+    src.season,
+    src.episode,
+    seasonsList,
+  ]);
 
   // ---------- helpers ----------
   const send = useCallback((command: string, args: unknown[] = []) => {
@@ -316,7 +423,7 @@ export function PlayerView({
   }, []);
 
   const poke = useCallback(() => {
-    if (castModeRef.current) return; // our chrome stays out of the way
+    if (directModeRef.current) return; // our chrome stays out of the way
     setControlsVisible(true);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     hideTimerRef.current = setTimeout(() => {
@@ -554,6 +661,135 @@ export function PlayerView({
     setControlsVisible(true);
     poke();
   }, [poke]);
+
+  // ---------- source switching ----------
+  // Reload from the current position on a new embed provider (or a new
+  // sub/dub track). VidLink/CineSrc carry the position via URL param;
+  // the rest just restart the title.
+  const resetForReload = useCallback(() => {
+    const t = Math.floor(timeRef.current);
+    setReady(false);
+    setPlaying(false);
+    playingRef.current = false;
+    setEnded(false);
+    setError(null);
+    lastSyncRef.current = null;
+    lastSaveRef.current = 0;
+    setSrc((s) => ({ ...s, resume: Math.max(0, t), nonce: s.nonce + 1 }));
+    setControlsVisible(true);
+    setSourcesOpen(false);
+  }, []);
+
+  const switchSource = useCallback(
+    (id: SourceId) => {
+      setSourcesOpen(false);
+      if (id === source) return;
+      persist(timeRef.current, durationRef.current);
+      setSource(id);
+      storeSource(id);
+      resetForReload();
+    },
+    [persist, resetForReload, source]
+  );
+
+  const switchAudio = useCallback(
+    (audio: AnimeAudio) => {
+      setSourcesOpen(false);
+      storeAudio(audio);
+      // The sub/dub toggle only exists on VidLink's anime path —
+      // picking a track there also means switching to that provider.
+      const needsProvider = source !== "vidlink";
+      if (audio === animeAudio && !needsProvider) return;
+      if (needsProvider) {
+        setSource("vidlink");
+        storeSource("vidlink");
+      }
+      setAnimeAudio(audio);
+      persist(timeRef.current, durationRef.current);
+      resetForReload();
+    },
+    [animeAudio, persist, resetForReload, source]
+  );
+
+  // ---------- VidLink player events (one-way postMessage) ----------
+  // Used in direct mode to mirror play state, save progress, follow the
+  // provider's internal episode navigation, and to know playback really
+  // started (which arms the immersive auto-landscape).
+  useEffect(() => {
+    if (source !== "vidlink") return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== VIDLINK) return;
+      const data = event.data as {
+        type?: string;
+        data?: {
+          event?: string;
+          currentTime?: number;
+          duration?: number;
+          season?: number;
+          episode?: number;
+        };
+      };
+      if (data?.type !== "PLAYER_EVENT" || !data.data) return;
+      const ev = data.data;
+      switch (ev.event) {
+        case "play":
+          setReady(true);
+          setError(null);
+          setPlaying(true);
+          playingRef.current = true;
+          tryAutoImmersive();
+          break;
+        case "pause":
+          setPlaying(false);
+          playingRef.current = false;
+          break;
+        case "seeked": {
+          const t = Number(ev.currentTime) || 0;
+          timeRef.current = t;
+          setTime(t);
+          lastSyncRef.current = { t, wall: performance.now() };
+          break;
+        }
+        case "timeupdate": {
+          const t = Number(ev.currentTime) || 0;
+          const d = Number(ev.duration) || 0;
+          timeRef.current = t;
+          if (d > 0) {
+            durationRef.current = d;
+            setDuration(d);
+          }
+          setTime(t);
+          lastSyncRef.current = { t, wall: performance.now() };
+          // Follow the provider's own next-episode navigation so
+          // Continue Watching lands on the right episode.
+          const s = Number(ev.season) || 0;
+          const e = Number(ev.episode) || 0;
+          if (
+            s > 0 &&
+            e > 0 &&
+            (s !== currentRef.current.season || e !== currentRef.current.episode)
+          ) {
+            currentRef.current = { season: s, episode: e };
+            setDisplay({ season: s, episode: e });
+          }
+          const now = Date.now();
+          if (now - lastSaveRef.current > 5000) {
+            lastSaveRef.current = now;
+            persist(t, d);
+          }
+          break;
+        }
+        case "ended":
+        case "end":
+          setPlaying(false);
+          playingRef.current = false;
+          if (!isTv) removeProgress(key);
+          break;
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [source, isTv, key, persist, tryAutoImmersive]);
 
   // ---------- effects ----------
   // Lock page scroll while the player is up
@@ -817,9 +1053,10 @@ export function PlayerView({
         case "Escape":
           if (castModeRef.current) {
             exitCastMode();
-          } else if (rateMenuRef.current || ccMenuRef.current) {
+          } else if (rateMenuRef.current || ccMenuRef.current || sourcesOpen) {
             setRateMenu(false);
             setCcMenu(false);
+            setSourcesOpen(false);
           } else if (episodesOpenRef.current) {
             setEpisodesOpen(false);
           } else if (!document.fullscreenElement) {
@@ -838,6 +1075,7 @@ export function PlayerView({
     hasNextEpisode,
     onBack,
     seekBy,
+    sourcesOpen,
     toggleFullscreen,
     toggleMute,
     togglePlay,
@@ -871,14 +1109,15 @@ export function PlayerView({
     };
   }, [persist]);
 
-  // "Still connecting…" hint when sources take a while
+  // "Still connecting…" hint when sources take a while (CineSrc only —
+  // direct-mode providers run their own loading UI)
   useEffect(() => {
     // Reset asynchronously (external trigger → state, per project convention)
     queueMicrotask(() => setSlowHint(false));
-    if (ready || error) return;
+    if (ready || error || source !== "cinesrc") return;
     const t = setTimeout(() => setSlowHint(true), 12000);
     return () => clearTimeout(t);
-  }, [ready, error, src]);
+  }, [ready, error, src, source]);
 
   // ---------- scrub ----------
   const ratioFromEvent = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -970,8 +1209,8 @@ export function PlayerView({
           intercept. A single tap toggles the controls (it never pauses);
           the buttons sit ABOVE this shield, so tapping them never toggles
           the UI. touch-manipulation kills the browser's double-tap zoom.
-          Cast mode lifts the shield so the stream's own UI can be used. */}
-      {!castMode && (
+          Direct mode lifts the shield so the provider's own UI can be used. */}
+      {matineeChrome && (
         <div
           aria-hidden
           className="absolute inset-0 z-[5] touch-manipulation"
@@ -980,8 +1219,8 @@ export function PlayerView({
       )}
 
       {/* ---------- Center controls: [-10s] [Play/Pause] [+10s] ----------
-          Springy motion, Netflix-style. Always hidden in cast mode. */}
-      {ready && !error && !castMode && (
+          Springy motion, Netflix-style. Only in Matinee chrome. */}
+      {ready && !error && matineeChrome && (
         <motion.div
           initial={false}
           animate={{
@@ -1071,8 +1310,9 @@ export function PlayerView({
         ) : null;
       })()}
 
-      {/* Loading veil */}
-      {!ready && !error && (
+      {/* Loading veil (CineSrc mode — direct providers run their own loading
+          UI, and a veil on top would block their play buttons) */}
+      {source === "cinesrc" && !ready && !error && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black">
           <Loader2
             className="h-10 w-10 animate-spin text-[#e50914]"
@@ -1087,6 +1327,23 @@ export function PlayerView({
               moment to warm up.
             </p>
           )}
+          {/* Source escape hatch — if this source is slow or empty,
+              jump straight to another one */}
+          <div
+            className="pointer-events-auto mt-2 flex max-w-[90vw] flex-wrap items-center justify-center gap-1.5"
+            aria-label="Switch stream source"
+          >
+            {PROVIDERS.filter((p) => p.id !== source).map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => switchSource(p.id)}
+                className="rounded-full border border-white/25 bg-black/60 px-3 py-1.5 text-[12px] font-semibold text-white/85 transition-colors hover:border-white hover:text-white"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -1119,8 +1376,8 @@ export function PlayerView({
         </div>
       )}
 
-      {/* Ended veil (movies) */}
-      {ended && !error && (
+      {/* Ended veil (movies, Matinee chrome only) */}
+      {ended && !error && matineeChrome && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-black/85 px-6 text-center">
           <p className="text-[13px] uppercase tracking-[0.28em] text-[#777]">
             You just watched
@@ -1165,7 +1422,8 @@ export function PlayerView({
         )}
       />
 
-      {/* ---------- Top bar ---------- */}
+      {/* ---------- Top bar (Matinee chrome) ---------- */}
+      {matineeChrome && (
       <motion.div
         initial={false}
         animate={{ opacity: controlsVisible ? 1 : 0, y: controlsVisible ? 0 : -10 }}
@@ -1195,8 +1453,10 @@ export function PlayerView({
           )}
         </div>
       </motion.div>
+      )}
 
-      {/* ---------- Bottom controls ---------- */}
+      {/* ---------- Bottom controls (Matinee chrome) ---------- */}
+      {matineeChrome && (
       <motion.div
         initial={false}
         animate={{ opacity: controlsVisible ? 1 : 0, y: controlsVisible ? 0 : 12 }}
@@ -1380,12 +1640,61 @@ export function PlayerView({
               onClick={() => {
                 setRateMenu((o) => !o);
                 setCcMenu(false);
+                setSourcesOpen(false);
               }}
               aria-label={`Playback speed ${rate}x`}
               aria-expanded={rateMenu}
               className="min-w-[36px] text-[13px] font-bold tabular-nums transition-transform hover:scale-110"
             >
               {rate}x
+            </button>
+
+            {/* Anime audio — SUB / DUB (VidLink anime path). Hidden for
+                non-anime titles; picking a track switches to that source. */}
+            {animeDetected && (
+              <div
+                className="flex items-center rounded-full bg-white/10 p-0.5"
+                role="group"
+                aria-label="Audio"
+              >
+                {(["sub", "dub"] as const).map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => switchAudio(a)}
+                    aria-pressed={animePathActive && a === animeAudio}
+                    title={
+                      a === "sub"
+                        ? "Japanese audio with subtitles"
+                        : "English dub"
+                    }
+                    className={cn(
+                      "rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition-colors",
+                      animePathActive && a === animeAudio
+                        ? "bg-[#e50914] text-white"
+                        : "text-white/70 hover:text-white"
+                    )}
+                  >
+                    {a}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Sources — switch embed provider without leaving the player */}
+            <button
+              type="button"
+              onClick={() => {
+                setSourcesOpen((o) => !o);
+                setRateMenu(false);
+                setCcMenu(false);
+              }}
+              aria-label="Switch stream source"
+              aria-expanded={sourcesOpen}
+              title="Stream sources"
+              className="transition-transform hover:scale-110"
+            >
+              <Server className="h-7 w-7" aria-hidden />
             </button>
 
             {/* Cast — hand the surface to the stream's own player UI.
@@ -1417,7 +1726,71 @@ export function PlayerView({
           </div>
         </div>
       </motion.div>
+      )}
 
+      {/* ---------- Direct mode pill ----------
+          The provider's own player UI is running; this is the one strip
+          of Matinee chrome on top: back, source switcher, and (for anime)
+          the SUB/DUB toggle. */}
+      {!matineeChrome && !castMode && (
+        <div className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-full bg-black/75 py-1 pl-1.5 pr-2 ring-1 ring-white/25 backdrop-blur-md">
+          <button
+            type="button"
+            aria-label="Back to browse"
+            onClick={onBack}
+            className="flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:bg-white/15"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setSourcesOpen((o) => {
+                setRateMenu(false);
+                setCcMenu(false);
+                return !o;
+              })}
+            aria-label="Switch stream source"
+            aria-expanded={sourcesOpen}
+            className="flex items-center gap-1.5 rounded-full px-2 py-1 text-white transition-colors hover:bg-white/15"
+          >
+            <Server className="h-4 w-4 text-[#e50914]" aria-hidden />
+            <span className="max-w-[120px] truncate text-[12px] font-semibold">
+              {provider.label}
+            </span>
+            <ChevronDown className="h-3 w-3 text-white/60" aria-hidden />
+          </button>
+          {animeDetected && (
+            <div
+              className="ml-1 flex items-center rounded-full bg-white/10 p-0.5"
+              role="group"
+              aria-label="Audio"
+            >
+              {(["sub", "dub"] as const).map((a) => (
+                <button
+                  key={a}
+                  type="button"
+                  onClick={() => switchAudio(a)}
+                  aria-pressed={animePathActive && a === animeAudio}
+                  title={
+                    a === "sub"
+                      ? "Japanese audio with subtitles"
+                      : "English dub"
+                  }
+                  className={cn(
+                    "rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide transition-colors",
+                    animePathActive && a === animeAudio
+                      ? "bg-[#e50914] text-white"
+                      : "text-white/70 hover:text-white"
+                  )}
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {/* ---------- Cast mode pill ----------
           The only Matinee chrome while the stream's own UI is up. */}
       {castMode && (
@@ -1440,15 +1813,95 @@ export function PlayerView({
       )}
 
       {/* ---------- Popups: outside-click shield ---------- */}
-      {(rateMenu || ccMenu) && (
+      {(rateMenu || ccMenu || sourcesOpen) && (
         <div
           aria-hidden
           className="absolute inset-0 z-20"
           onClick={() => {
             setRateMenu(false);
             setCcMenu(false);
+            setSourcesOpen(false);
           }}
         />
+      )}
+
+      {/* ---------- Stream sources menu ---------- */}
+      {sourcesOpen && (
+        <motion.div
+          role="menu"
+          aria-label="Stream sources"
+          initial={{ opacity: 0, y: 10, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: "spring", stiffness: 500, damping: 32 }}
+          style={{ transformOrigin: "bottom right" }}
+          className="styled-scrollbar absolute bottom-24 right-3 z-30 w-[min(88vw,320px)] overflow-y-auto rounded-[8px] bg-[#181818]/97 p-2 ring-1 ring-white/15 backdrop-blur md:right-8"
+        >
+          <p className="px-2 pb-2 pt-1 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+            Stream source
+          </p>
+          {PROVIDERS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={source === p.id}
+              onClick={() => switchSource(p.id)}
+              className={cn(
+                "flex w-full items-start justify-between gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors",
+                source === p.id
+                  ? "bg-white/10 text-white"
+                  : "text-white/85 hover:bg-white/5"
+              )}
+            >
+              <span className="min-w-0">
+                <span className="block text-[14px] font-semibold">
+                  {p.label}
+                  {p.id === "vidlink" && (
+                    <span className="ml-2 rounded-[3px] bg-[#e50914] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white">
+                      Fast
+                    </span>
+                  )}
+                </span>
+                <span className="mt-0.5 block text-[11.5px] leading-snug text-white/50">
+                  {p.note}
+                </span>
+              </span>
+              {source === p.id && (
+                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#e50914]" />
+              )}
+            </button>
+          ))}
+          {animeDetected && (
+            <div className="mt-1 border-t border-white/10 px-2 pb-1.5 pt-2">
+              <p className="pb-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-white/50">
+                Anime audio
+              </p>
+              <div className="flex items-center gap-1">
+                {(["sub", "dub"] as const).map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={animeAudio === a}
+                    onClick={() => switchAudio(a)}
+                    className={cn(
+                      "flex-1 rounded-[6px] px-3 py-1.5 text-[13px] font-bold uppercase transition-colors",
+                      animeAudio === a
+                        ? "bg-[#e50914] text-white"
+                        : "text-white/80 hover:bg-white/10"
+                    )}
+                  >
+                    {a === "sub" ? "Sub (JP)" : "Dub (EN)"}
+                  </button>
+                ))}
+              </div>
+              <p className="px-0.5 pt-1.5 text-[11px] leading-snug text-white/40">
+                Sub/dub runs on VidLink{source !== "vidlink" && " — picking one switches to it"}.
+                {animeFailed && " No anime match found, playing the regular source."}
+              </p>
+            </div>
+          )}
+        </motion.div>
       )}
 
       {/* ---------- Speed option tabs ---------- */}

@@ -44,11 +44,15 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Warm the connection to the streaming embed while the user
+        {/* Warm the connections to the streaming embeds while the user
             browses, so hitting Play starts loading a source right away
-            instead of paying the DNS + TLS handshake first. */}
-        <link rel="preconnect" href="https://cinesrc.st" />
+            instead of paying the DNS + TLS handshake first. VidLink is
+            the default source; the rest load on demand. */}
+        <link rel="preconnect" href="https://vidlink.pro" />
+        <link rel="dns-prefetch" href="https://vidlink.pro" />
         <link rel="dns-prefetch" href="https://cinesrc.st" />
+        <link rel="dns-prefetch" href="https://www.2embed.cc" />
+        <link rel="dns-prefetch" href="https://graphql.anilist.co" />
       </head>
       <body
         className={`${inter.variable} ${bebasNeue.variable} antialiased bg-background text-foreground`}

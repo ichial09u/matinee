@@ -18,6 +18,7 @@ interface RawMedia {
   release_date?: string;
   first_air_date?: string;
   genre_ids?: number[];
+  original_language?: string | null;
 }
 
 function normalizeList(raw: RawMedia[], mediaType: "movie" | "tv"): MediaItem[] {
@@ -34,6 +35,7 @@ function normalizeList(raw: RawMedia[], mediaType: "movie" | "tv"): MediaItem[] 
       releaseDate: m.release_date || m.first_air_date || null,
       mediaType,
       genreIds: m.genre_ids || [],
+      originalLanguage: m.original_language || null,
     }));
 }
 

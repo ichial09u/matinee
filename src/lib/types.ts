@@ -13,7 +13,9 @@ export interface MediaItem {
   year: string | null;
   mediaType: "movie" | "tv";
   genreIds?: number[];
-  /** TMDB release/first-air date "YYYY-MM-DD" — future = not on CineSrc yet */
+  /** ISO 639-1 original language ("ja", "en", …) — powers anime detection */
+  originalLanguage?: string | null;
+  /** TMDB release/first-air date "YYYY-MM-DD" — future = not on stream sources yet */
   releaseDate?: string | null;
 }
 
@@ -38,6 +40,8 @@ export interface MediaDetail extends MediaItem {
     episodeCount: number;
     airDate: string | null;
   }[];
+  /** TMDB keyword ids — 210024 is "anime" (better than genre+language alone) */
+  keywords?: number[];
   /** TMDB clear-logo path (title treatment image, like Netflix billboards) */
   logo?: string | null;
   /** US maturity rating, e.g. "PG-13" / "TV-MA" */

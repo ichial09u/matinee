@@ -454,7 +454,8 @@ function MovieApp() {
         <div className="mx-auto max-w-[1000px] px-4 py-10 text-[13px] text-[#808080] md:px-6">
           <p className="mb-6">
             Questions? Everything here runs on public APIs — TMDB for the
-            catalog, TVMaze for episode guides, CineSrc for the streams.
+            catalog, TVMaze for episode guides, AniList for anime matching,
+            and multiple streaming sources you can switch between in the player.
           </p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 md:grid-cols-4">
             <div className="space-y-3">
@@ -482,6 +483,9 @@ function MovieApp() {
               </a>
               <a href="https://cinesrc.st" target="_blank" rel="noopener noreferrer" className="block hover:underline">
                 CineSrc
+              </a>
+              <a href="https://vidlink.pro" target="_blank" rel="noopener noreferrer" className="block hover:underline">
+                VidLink
               </a>
             </div>
             <div className="space-y-3">

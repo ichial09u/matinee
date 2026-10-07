@@ -19,6 +19,7 @@ interface RawMedia {
   release_date?: string;
   first_air_date?: string;
   genre_ids?: number[];
+  original_language?: string | null;
 }
 
 export async function GET(req: NextRequest) {
@@ -76,6 +77,7 @@ export async function GET(req: NextRequest) {
         releaseDate: m.release_date || m.first_air_date || null,
         mediaType: type,
         genreIds: m.genre_ids || [],
+        originalLanguage: m.original_language || null,
       }));
     return NextResponse.json({
       items,

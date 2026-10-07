@@ -14,11 +14,20 @@ Matinee's own player on top of a sandboxed, popup-proof embed.
   - [TMDB](https://www.themoviedb.org/) for movies & TV (trending, popular,
     top-rated, search, details, similar titles)
   - [TVMaze](https://www.tvmaze.com/) for TV episode guides
-- **In-house player** — playback, progress bar, ±10s skip, volume, speed,
-  next episode, episode picker, and Continue Watching stored locally.
-  The stream embed is sandboxed **without** `allow-popups`, sits behind a
-  full-surface click shield, and runs with its own controls off — popup ads
-  are structurally impossible, and every interaction belongs to Matinee.
+  - [AniList](https://anilist.co/) for anime matching (sub/dub sources)
+- **Multi-source playback** — streams come from swappable embed sources
+  (VidLink by default for speed, plus 2Embed, MultiEmbed, VidSrc and
+  CineSrc as backups), all sandboxed popup-proof. A source switcher
+  lives right in the player, and anime gets a **SUB / DUB toggle** via
+  VidLink's anime path (MAL ids resolved from TMDB through AniList).
+- **In-house player on CineSrc** — playback, progress bar, ±10s skip,
+  volume, speed, next episode, episode picker, and Continue Watching
+  stored locally. The stream embed is sandboxed **without** `allow-popups`,
+  sits behind a full-surface click shield, and runs with its own controls
+  off — popup ads are structurally impossible, and every interaction
+  belongs to Matinee. Other sources run in direct mode: their own player
+  UI inside the same popup-proof sandbox, with progress tracked from
+  VidLink's player events.
 - **Auto-landscape playback** — hitting Play automatically goes fullscreen
   and locks the screen to landscape (CSS-rotates the player on browsers
   that can't lock orientation, e.g. iOS Safari).

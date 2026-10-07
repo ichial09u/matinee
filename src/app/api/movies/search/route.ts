@@ -20,6 +20,8 @@ interface RawMedia {
   release_date?: string;
   first_air_date?: string;
   known_for_department?: string;
+  genre_ids?: number[];
+  original_language?: string | null;
 }
 
 export async function GET(req: NextRequest) {
@@ -52,6 +54,8 @@ export async function GET(req: NextRequest) {
         year: (m.release_date || m.first_air_date || "").slice(0, 4) || null,
         releaseDate: m.release_date || m.first_air_date || null,
         mediaType: m.media_type as "movie" | "tv",
+        genreIds: m.genre_ids || [],
+        originalLanguage: m.original_language || null,
       }));
 
     return NextResponse.json({

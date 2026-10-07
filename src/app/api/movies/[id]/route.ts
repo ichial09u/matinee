@@ -12,6 +12,7 @@ interface RawDetail {
   title?: string;
   name?: string;
   overview?: string;
+  original_language?: string | null;
   tagline?: string | null;
   poster_path?: string | null;
   backdrop_path?: string | null;
@@ -53,6 +54,9 @@ interface RawDetail {
   images?: {
     logos?: { file_path: string; iso_639_1: string | null }[];
   };
+  /* keywords append_to_response: movies → { keywords: [...] },
+     TV → { results: [...] } — both shapes handled below */
+  keywords?: { keywords?: { id: number }[]; results?: { id: number }[] };
   release_dates?: {
     results?: {
       iso_3166_1: string;
@@ -120,7 +124,7 @@ export async function GET(
       `/${type}/${id}`,
       key,
       {
-        append_to_response: `credits,videos,similar,recommendations,watch/providers,images,${
+        append_to_response: `credits,videos,similar,recommendations,watch/providers,images,keywords,${
           type === "movie" ? "release_dates" : "content_ratings"
         }`,
         include_image_language: "en,null",
@@ -168,6 +172,12 @@ export async function GET(
         ? data.recommendations.results
         : data.similar?.results) || [];
 
+    // Keyword ids (anime detection — 210024 is "anime")
+    const keywordIds = [
+      ...((data.keywords?.keywords || []) as { id: number }[]),
+      ...((data.keywords?.results || []) as { id: number }[]),
+    ].map((k) => k.id);
+
     // Season list for the episode picker (real seasons only, no specials)
     const seasonsList = (data.seasons || [])
       .filter((s) => s.season_number > 0 && (s.episode_count ?? 0) > 0)
@@ -187,6 +197,7 @@ export async function GET(
       rating: data.vote_average ?? null,
       year: (data.release_date || data.first_air_date || "").slice(0, 4) || null,
       mediaType: type,
+      originalLanguage: data.original_language || null,
       tagline: data.tagline || null,
       runtime: data.runtime || data.episode_run_time?.[0] || null,
       genres: data.genres || [],
@@ -212,6 +223,7 @@ export async function GET(
       seasons: data.number_of_seasons ?? null,
       episodeCount: data.number_of_episodes ?? null,
       seasonsList,
+      keywords: keywordIds,
       logo,
       certification,
     };
